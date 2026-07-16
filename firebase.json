@@ -4,15 +4,42 @@
   },
   "hosting": {
     "public": "public",
-    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
     "rewrites": [
-      { "source": "**", "destination": "/index.html" }
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
     ],
     "headers": [
       {
+        "source": "/downloads/ballrr-app.bin",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "application/vnd.android.package-archive"
+          },
+          {
+            "key": "Content-Disposition",
+            "value": "attachment; filename=ballrr.apk"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          }
+        ]
+      },
+      {
         "source": "**",
         "headers": [
-          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          }
         ]
       }
     ]
