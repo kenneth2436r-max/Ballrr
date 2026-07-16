@@ -1,0 +1,16 @@
+{
+     "appId": "com.ballrr.app",
+     "appName": "Ballrr",
+     "webDir": "www",
+     "server": {
+       "url": "https://tournament-tracker-f343b.web.app",
+       "cleartext": false
+     },
+     "backgroundColor": "#000000",
+     "plugins": {
+       "FirebaseAuthentication": {
+         "providers": ["google.com"],
+         "skipNativeAuth": false
+       }
+     }
+   }

@@ -1,0 +1,111 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Private tournaments -- unchanged from before. Only the owner can ever read or write
+    // their own private tournament doc.
+    match /tournaments/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Shared tournaments -- split into a metadata doc (membership) and a payload subdocument
+    // (the actual tournament data), so someone whose join request is still pending can see
+    // that the tournament exists and who's in it, but genuinely cannot read or write the live
+    // scores/data until the organizer approves them.
+    match /shared/{code} {
+      // Any signed-in user who has the code can read the metadata -- the code itself is the
+      // secret (nobody can list/discover codes without already knowing one), and the metadata
+      // here (membership, names, approval setting) isn't sensitive on its own.
+      allow read: if request.auth != null;
+
+      // Only the creator can create a shared tournament, and only as its sole initial member.
+      allow create: if request.auth != null &&
+        request.resource.data.ownerId == request.auth.uid &&
+        request.resource.data.members == [request.auth.uid] &&
+        request.resource.data.pendingRequests == [] &&
+        request.resource.data.followers == [];
+
+      allow update: if request.auth != null && (
+        // Existing members (including the owner) can change anything -- normal gameplay
+        // saves, and the owner approving/rejecting requests or removing members.
+        request.auth.uid in resource.data.members
+
+        // A brand new user requesting to join AS AN EDITOR when approval is required: may
+        // only add themselves to pendingRequests (and record their own display name).
+        || (
+          resource.data.requireApproval == true &&
+          !(request.auth.uid in resource.data.members) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pendingRequests', 'memberNames']) &&
+          request.resource.data.pendingRequests == resource.data.pendingRequests.concat([request.auth.uid])
+        )
+
+        // A brand new user joining directly as an editor when approval is NOT required: may
+        // only add themselves to members (and record their own display name), nothing else.
+        || (
+          resource.data.requireApproval == false &&
+          !(request.auth.uid in resource.data.members) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberNames']) &&
+          request.resource.data.members == resource.data.members.concat([request.auth.uid])
+        )
+
+        // A pending user cancelling their own edit request: may only remove themselves from
+        // pendingRequests.
+        || (
+          request.auth.uid in resource.data.pendingRequests &&
+          !(request.auth.uid in resource.data.members) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pendingRequests']) &&
+          request.resource.data.pendingRequests == resource.data.pendingRequests.removeAll([request.auth.uid])
+        )
+
+        // Following (view-only) is self-service and never gated behind requireApproval --
+        // it grants read access only, never write access to the payload, so there's nothing
+        // for an organizer to approve. Anyone not already a member or follower may add
+        // themselves to followers (and record their own display name), nothing else.
+        || (
+          !(request.auth.uid in resource.data.members) &&
+          !(request.auth.uid in resource.data.followers) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers', 'followerNames']) &&
+          request.resource.data.followers == resource.data.followers.concat([request.auth.uid])
+        )
+
+        // A follower unfollowing: may only remove themselves from followers.
+        || (
+          request.auth.uid in resource.data.followers &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers']) &&
+          request.resource.data.followers == resource.data.followers.removeAll([request.auth.uid])
+        )
+      );
+
+      // Only the owner can delete (disband) a shared tournament.
+      allow delete: if request.auth != null && request.auth.uid == resource.data.ownerId;
+
+      // The actual tournament data.
+      match /payload/{doc} {
+        // Members AND followers can read live -- this is what lets a follower see the score
+        // update in real time. Only confirmed members can write -- this is what actually keeps
+        // a follower (or a pending edit request) genuinely read-only/blank until they're a
+        // member, not just UI that could be bypassed.
+        allow read: if request.auth != null && (
+          request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members ||
+          request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.followers
+        );
+        allow write: if request.auth != null &&
+          request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members;
+      }
+    }
+
+    // Client-side error log fallback for browser/web users (Crashlytics has no web SDK, and
+    // this app deliberately avoids Cloud Functions/Analytics billing -- see the notification
+    // system for the same tradeoff). Write-only: the app never reads this back, so there's no
+    // read rule; a person only ever sees these in the Firebase console. Each doc is capped in
+    // size and can only claim the writer's own uid, so it can't be used to impersonate someone
+    // else or store arbitrary large payloads.
+    match /errorLogs/{id} {
+      allow read, update, delete: if false;
+      allow create: if request.auth != null &&
+        (request.resource.data.uid == null || request.resource.data.uid == request.auth.uid) &&
+        request.resource.data.message is string && request.resource.data.message.size() <= 500 &&
+        request.resource.data.stack is string && request.resource.data.stack.size() <= 2000;
+    }
+  }
+}

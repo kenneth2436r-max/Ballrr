@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+android/app/build/
+android/build/
+android/.gradle/
+android/app/release/
+android/**/build/
+ios/App/Pods/
+ios/App/build/
+ios/App/DerivedData/
+ios/App/App/public/
+
+# Firebase
+.firebase/
+.firebaserc.local
+*.log
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Env / secrets
+.env
+.env.local
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist

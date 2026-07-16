@@ -1,0 +1,27 @@
+{
+  "name": "ballrr",
+  "version": "1.0.0",
+  "description": "Ballrr - casual football tournament tracker",
+  "private": true,
+  "scripts": {
+    "sync": "npx cap sync",
+    "test": "node tests/run-all.js",
+    "deploy:staging": "firebase hosting:channel:deploy staging --expires 7d",
+    "deploy:prod": "firebase deploy --only hosting,firestore:rules"
+  },
+  "dependencies": {
+    "@capacitor-firebase/authentication": "^8.3.0",
+    "@capacitor-firebase/crashlytics": "^8.3.0",
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/app": "^8.1.0",
+    "@capacitor/cli": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/haptics": "^8.0.2",
+    "@capacitor/ios": "^8.4.1",
+    "@capacitor/local-notifications": "^8.2.0",
+    "firebase": "^12.16.0"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
