@@ -342,17 +342,17 @@ select option{background:var(--input-bg);color:var(--text)}
 .ko-sub{font-size:12px;color:var(--text-faint);margin-top:3px}
 .ko-pending{opacity:0.55;border-style:dashed}
 .ko-round-header{font-size:11px;font-weight:600;color:var(--text-muted);margin:14px 0 8px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);padding-bottom:6px}
-.bracket-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;display:flex;gap:14px;padding-bottom:10px;margin:4px -2px}
-.bracket-col{display:flex;flex-direction:column;justify-content:space-around;gap:12px;min-width:158px;flex:none}
-.bracket-col-title{font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;text-align:center;margin-bottom:2px}
-.bracket-match{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:8px 10px}
+.bracket-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;display:flex;gap:20px;padding-bottom:10px;margin:4px -2px}
+.bracket-col{display:flex;flex-direction:column;justify-content:space-around;gap:16px;min-width:196px;flex:none}
+.bracket-col-title{font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;text-align:center;margin-bottom:4px}
+.bracket-match{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
 .bracket-match.decided{border-color:#8fbf7a}
-.bracket-team{display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 0;font-size:12px;font-weight:600;color:var(--text)}
+.bracket-team{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:7px 0;font-size:14px;font-weight:600;color:var(--text)}
 .bracket-team+.bracket-team{border-top:1px solid var(--border)}
 .bracket-team.eliminated{text-decoration:line-through;color:var(--text-faint);font-weight:500;opacity:0.65}
 .bracket-team.advancing{color:#2a7d1a}
 .bracket-team.tbd{color:var(--text-faint);font-style:italic;font-weight:500}
-.bracket-champion{margin-top:14px;text-align:center;font-size:14px;font-weight:800;background:var(--input-bg);border-radius:10px;padding:12px}
+.bracket-champion{margin-top:16px;text-align:center;font-size:16px;font-weight:800;background:var(--input-bg);border-radius:12px;padding:16px}
 
 /* Help / About tab */
 .help-about{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:18px}
@@ -738,6 +738,11 @@ select option{background:var(--input-bg);color:var(--text)}
 
 <!-- SETTINGS -->
 <div id="tab-settings" class="section">
+  <div class="edit-section">
+    <div class="edit-title">Get the App</div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Android: download and install directly. iPhone: add this site to your Home Screen from Safari (Share icon → Add to Home Screen) for an app-like experience — no App Store needed.</p>
+    <a href="/downloads/ballrr-app.bin" download="ballrr.apk" style="display:block;width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;text-align:center;text-decoration:none;box-sizing:border-box">⬇ Download Android App (.apk)</a>
+  </div>
   <div class="edit-section">
     <div class="edit-title">Appearance</div>
     <div id="theme-toggle-row" style="display:flex;gap:8px">
@@ -5101,8 +5106,14 @@ function renderDraft(){
   // roster, completely bypassing the pool/wheel/draft-order machinery above. A tournament
   // where every team card was filled in this way works identically to one built through the
   // wheel -- fixtures, results, ratings and stats don't know or care how a roster was built.
+  const showManualEntry=state.draftManualEntryVisible!==false;
   html+=`<div class="draft-board">
-    <div class="section-header">Draft Board</div>
+    <div class="section-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <span>Draft Board</span>
+      <label class="customko-toggle" style="margin-bottom:0;font-size:12px;font-weight:600;text-transform:none;letter-spacing:normal;color:var(--text-muted)">
+        <input type="checkbox" ${showManualEntry?'checked':''} onchange="toggleDraftManualEntry(this.checked)"> Manual
+      </label>
+    </div>
     ${state.teamNames.map((tn,ti)=>{
       const picks=state.players.map((p,gi)=>({...p,gi})).filter(p=>p.team===ti);
       const avg=teamAvgRating(ti);
@@ -5115,14 +5126,14 @@ function renderDraft(){
           </span>
         </div>
         ${picks.length?`<div class="chip-wrap">${picks.map(p=>`<span class="chip">${esc(p.name)}<button onclick="removeDraftedPlayer(${p.gi})" title="Send back to pool">×</button></span>`).join('')}</div>`:'<div class="rc-empty">No players drafted yet</div>'}
-        <div class="pool-add-row" style="margin-top:8px">
+        ${showManualEntry?`<div class="pool-add-row" style="margin-top:8px">
           <input type="text" placeholder="Add player directly (e.g. injury cover)" onkeydown="if(event.key==='Enter'){addPlayerToTeamRosterUI(${ti},this.value);this.value='';}">
           <button onclick="const inp=this.previousElementSibling;addPlayerToTeamRosterUI(${ti},inp.value);inp.value='';">+ Add</button>
         </div>
         <div class="bulk-add" style="margin-top:6px">
           <textarea id="team-bulk-${ti}" placeholder="Or paste ${esc(tn)}'s full roster, one player per line"></textarea>
           <button onclick="bulkAddPlayersToTeamUI(${ti})">Add all lines to ${esc(tn)}</button>
-        </div>
+        </div>`:''}
       </div>`;
     }).join('')}
   </div>`;
@@ -5153,6 +5164,7 @@ function renderPlayerPositionsSection(){
     return`<div class="pos-picker-row">
       <span class="pp-name">${esc(name)}</span>
       <div class="pos-chip-group">${chips}</div>
+      <button onclick="removePlayerFromPositionDB('${safeName}')" title="Remove from the position database (a currently rostered/pooled player will reappear with no positions tagged -- this only truly removes players no longer active anywhere)" style="background:none;border:none;color:var(--text-faint);font-size:16px;cursor:pointer;padding:0 4px;line-height:1;flex:none">×</button>
     </div>`;
   }).join('');
   return`<div class="edit-section">
@@ -5175,6 +5187,16 @@ function registerPlayerPosition(){
   if(!name)return;
   setPlayerPosition(name,posEl.value);
   nameEl.value='';
+  renderDraft();
+}
+// Clears a player's tagged positions out of the persistent position database. If that name is
+// still sitting in this tournament's pool/roster/captains, it reappears in the list right away
+// with no positions tagged (ready to re-tag or just ignore) -- this is only a true, lasting
+// removal for names that aren't referenced anywhere else, which is exactly the "player is no
+// longer active" and "stray duplicate from a spelling/capitalization slip" cases this is for.
+function removePlayerFromPositionDB(name){
+  state.playerDB=(state.playerDB||[]).filter(p=>p.name!==name);
+  saveState();
   renderDraft();
 }
 
@@ -5225,6 +5247,16 @@ function bulkAddPlayersToTeamUI(teamId){
   names.forEach(name=>addPlayerToTeamRoster(teamId,name));
   el.value='';
   renderAll();
+}
+
+// Purely a decluttering toggle -- hides the "add player directly" and "paste a full roster"
+// input blocks on every team card in the Draft Board when someone isn't using manual entry
+// (e.g. they're only using the wheel/auto-generate). Doesn't touch any already-drafted
+// players or clear anything already typed elsewhere; it just hides the input UI itself.
+function toggleDraftManualEntry(checked){
+  state.draftManualEntryVisible=checked;
+  saveState();
+  renderDraft();
 }
 
 function saveCaptains(){
