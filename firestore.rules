@@ -74,6 +74,24 @@ service cloud.firestore {
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers']) &&
           request.resource.data.followers == resource.data.followers.removeAll([request.auth.uid])
         )
+
+        // Requesting to VIEW a private (host-follow) tournament: the view-only equivalent of
+        // the edit-access pendingRequests branch above, gated by visibility=='private' instead
+        // of requireApproval. May only add themselves to pendingFollowerRequests.
+        || (
+          resource.data.visibility == 'private' &&
+          !(request.auth.uid in resource.data.members) &&
+          !(request.auth.uid in resource.data.followers) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pendingFollowerRequests', 'followerNames']) &&
+          request.resource.data.pendingFollowerRequests == resource.data.pendingFollowerRequests.concat([request.auth.uid])
+        )
+
+        // A pending follower cancelling their own view request.
+        || (
+          request.auth.uid in resource.data.pendingFollowerRequests &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['pendingFollowerRequests']) &&
+          request.resource.data.pendingFollowerRequests == resource.data.pendingFollowerRequests.removeAll([request.auth.uid])
+        )
       );
 
       // Only the owner can delete (disband) a shared tournament.
@@ -92,6 +110,53 @@ service cloud.firestore {
         allow write: if request.auth != null &&
           request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members;
       }
+    }
+
+    // Host-level following: lets someone follow a PERSON (not a single tournament code) and get
+    // notified whenever that host starts a new one. hostCodes/{code} is a permanent, one-way
+    // lookup (code -> uid), mirroring the shared/{code} pattern. hostProfiles/{uid} is the
+    // profile itself (display name, permanent host code, follower list, and a pointer to the
+    // most recently started tournament) -- keyed by uid like tournaments/{uid}.
+    match /hostCodes/{code} {
+      allow read: if request.auth != null;
+      // Created exactly once, only by the uid it points to, and never changed afterward.
+      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
+      allow update, delete: if false;
+    }
+    match /hostProfiles/{uid} {
+      // Anyone signed in can read a host's profile -- required for a follower's listener to
+      // watch latestStartedAt at all, same reasoning as shared/{code} metadata being readable
+      // by anyone who has the code.
+      allow read: if request.auth != null;
+
+      allow create: if request.auth != null && request.auth.uid == uid &&
+        request.resource.data.followers == [];
+
+      allow update: if request.auth != null && (
+        // The host can update their own profile fields (name, host code, latest tournament
+        // pointer) freely, but never touch followers/followerNames through this path -- that's
+        // self-service for followers only, below, so a host can't silently add/remove them.
+        (
+          request.auth.uid == uid &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['followers', 'followerNames'])
+        )
+
+        // Anyone not already following may add themselves (view-only relationship).
+        || (
+          !(request.auth.uid in resource.data.followers) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers', 'followerNames']) &&
+          request.resource.data.followers == resource.data.followers.concat([request.auth.uid])
+        )
+
+        // A follower unfollowing: may only remove themselves.
+        || (
+          request.auth.uid in resource.data.followers &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers']) &&
+          request.resource.data.followers == resource.data.followers.removeAll([request.auth.uid])
+        )
+      );
+
+      allow delete: if request.auth != null && request.auth.uid == uid;
     }
 
     // Client-side error log fallback for browser/web users (Crashlytics has no web SDK, and
