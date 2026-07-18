@@ -1036,7 +1036,16 @@ function teamLetter(i){return i<ALPHA.length?ALPHA[i]:String(i+1);}
 function defaultNames(n){return Array.from({length:n},(_,i)=>'Team '+teamLetter(i));}
 function legsLabel(n){return({1:'Single',2:'Double',3:'Triple',4:'Quadruple'}[n])||(n+'x');}
 
-function blankMatch(){return{played:false,g:[null,null],scorers:[],assists:[],ratings:[],squad:{},rotational:{},posOverrides:{},formation:'standard',ratingOverrides:{},contributions:{},timer:{running:false,accumulatedMs:0,startedAt:null,targetMinutes:90,injuryMinutes:0},events:[],mediaLinks:[]};}
+// Root cause of knockout matches always showing 90 min even after the Settings > Default match
+// length was set to something else: this used to hardcode targetMinutes:90 unconditionally, and
+// every knockout/page3/custom-stage match object is created via this same factory (ensureKORounds,
+// koThird, page3, custom stages) -- league fixtures were the only thing that ever got individually
+// patched to the real default afterward (see applyFormatCore/applyDefaultMatchMinutesToAll).
+// Reading state.defaultMatchMinutes here fixes it at the source for every match type at once.
+function blankMatch(){
+  const mins=(typeof state!=='undefined'&&state&&typeof state.defaultMatchMinutes==='number')?state.defaultMatchMinutes:90;
+  return{played:false,g:[null,null],scorers:[],assists:[],ratings:[],squad:{},rotational:{},posOverrides:{},formation:'standard',ratingOverrides:{},contributions:{},timer:{running:false,accumulatedMs:0,startedAt:null,targetMinutes:mins,injuryMinutes:0},events:[],mediaLinks:[]};
+}
 
 function genFixtures(n,legs){
   const m=[];
@@ -5640,16 +5649,25 @@ function renderDraft(){
     ${state.teamNames.map((tn,ti)=>{
       const picks=state.players.map((p,gi)=>({...p,gi})).filter(p=>p.team===ti);
       const avg=teamAvgRating(ti);
+      const keeperPick=picks.find(p=>getPlayerPosition(p.name)==='GK');
       return`<div class="roster-card">
         <div class="rc-head">
           <span class="rc-team">${esc(tn)}</span>
           <span style="display:flex;gap:6px;align-items:center">
             ${avg!=null?ratingBadge(avg):''}
             ${state.captains[ti]?`<span class="rc-cap">Cap. ${esc(state.captains[ti])}</span>`:''}
+            ${keeperPick?`<span class="rc-cap" style="background:#E08A2A22;color:#E08A2A">🧤 ${esc(keeperPick.name)}</span>`:''}
           </span>
         </div>
         ${picks.length?`<div class="chip-wrap">${picks.map(p=>`<span class="chip">${esc(p.name)}<button onclick="removeDraftedPlayer(${p.gi})" title="Send back to pool">×</button></span>`).join('')}</div>`:'<div class="rc-empty">No players drafted yet</div>'}
         ${showManualEntry?`<div class="pool-add-row" style="margin-top:8px">
+          <select id="keeper-select-${ti}" style="flex:1">
+            <option value="">— No keeper set —</option>
+            ${picks.map(p=>`<option value="${esc(p.name)}" ${getPlayerPosition(p.name)==='GK'?'selected':''}>${esc(p.name)}</option>`).join('')}
+          </select>
+          <button onclick="const sel=document.getElementById('keeper-select-${ti}');setTeamKeeper(${ti},sel.value)" title="Fixes this player as ${esc(tn)}'s keeper for every match, so you don't have to place them in goal manually in the Lineup tab. If the keeper changes mid-tournament, use the Lineup tab's swap instead for that one match, or pick a new keeper here to change it for good.">🧤 Set Keeper</button>
+        </div>
+        <div class="pool-add-row" style="margin-top:8px">
           <input type="text" placeholder="Add player directly (e.g. injury cover)" onkeydown="if(event.key==='Enter'){addPlayerToTeamRosterUI(${ti},this.value);this.value='';}">
           <button onclick="const inp=this.previousElementSibling;addPlayerToTeamRosterUI(${ti},inp.value);inp.value='';">+ Add</button>
         </div>
@@ -5747,6 +5765,25 @@ function removeDraftedPlayer(gi){
   const p=state.players.splice(gi,1)[0];
   if(p)state.playerPool.push(p.name);
   saveState();renderAll();
+}
+
+// Fixes one player as a team's permanent keeper (their primary Player Position becomes GK),
+// so every match they're in defaults to goal without needing to place them there by hand in the
+// Lineup tab every time. Demotes whoever WAS this team's keeper back to MID first, so a team
+// never ends up with two players simultaneously tagged GK. Picking "— No keeper set —" (an empty
+// name) just demotes the current keeper without assigning a new one.
+// If the keeper changes for a single match only (an injury, a one-off cover), use the Lineup
+// tab's existing per-match position swap instead -- that overrides just that match without
+// touching this permanent setting. Re-running this (or picking a different name) is for when the
+// change is for the rest of the tournament.
+function setTeamKeeper(teamId,name){
+  name=(name||'').trim();
+  fullTeamRoster(teamId).forEach(n=>{
+    if(n!==name&&getPlayerPosition(n)==='GK')setPlayerPosition(n,'MID');
+  });
+  if(name)setPlayerPosition(name,'GK');
+  saveState();
+  renderDraft();
 }
 
 // UI wrapper around addPlayerToTeamRoster() for the Draft Board's inline add-form -- lets you
@@ -8218,15 +8255,24 @@ function setDefaultMatchMinutes(mins){
   state.defaultMatchMinutes=parseInt(mins)||90;
   saveState();
 }
+// Used to only touch state.results (league fixtures) -- knockout matches (regular bracket,
+// 3rd-place, 3-team page playoff, custom stages) were never included, so "Apply to all" silently
+// left every knockout match at whatever it already had (usually 90, from blankMatch()). Now
+// walks every match container the app has.
 function applyDefaultMatchMinutesToAll(){
   const mins=state.defaultMatchMinutes||90;
   let count=0;
-  (state.results||[]).forEach(r=>{
-    if(r.played)return;
-    if(!r.timer)r.timer={running:false,accumulatedMs:0,startedAt:null,targetMinutes:mins,injuryMinutes:0};
-    r.timer.targetMinutes=mins;
+  const applyToTimer=(m)=>{
+    if(!m||m.played)return;
+    if(!m.timer)m.timer={running:false,accumulatedMs:0,startedAt:null,targetMinutes:mins,injuryMinutes:0};
+    m.timer.targetMinutes=mins;
     count++;
-  });
+  };
+  (state.results||[]).forEach(applyToTimer);
+  if(state.page3){[state.page3.qualifier,state.page3.eliminator,state.page3.final].forEach(applyToTimer);}
+  if(state.koThird)applyToTimer(state.koThird);
+  (state.koRounds||[]).forEach(round=>(round||[]).forEach(applyToTimer));
+  (state.customResults||[]).forEach(stage=>(stage||[]).forEach(applyToTimer));
   saveState();renderAll();
   alert(count?`Set ${count} unplayed match${count===1?'':'es'} to ${mins} min.`:'No unplayed matches to update.');
 }
