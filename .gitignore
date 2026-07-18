@@ -31,6 +31,11 @@ Thumbs.db
 google-services.json
 GoogleService-Info.plist
 
-# APK build output isn't source -- it's copied into public/downloads/ manually before each
-# `firebase deploy`, not committed to git.
-public/downloads/
+# NOTE: public/downloads/ (the hosted APK) is intentionally NOT ignored anymore -- see the
+# "Fix APK parse error" note in the project history. It used to be gitignored on the assumption
+# that a manual `firebase deploy` would always run right after copying in a fresh build, but
+# GitHub Actions now auto-deploys hosting on every push, and a CI checkout never has gitignored
+# files -- so every auto-deploy was silently wiping the APK from the live site, and anyone
+# hitting the download link got served the SPA's index.html instead (renamed to .apk by the
+# download attribute), which Android correctly refuses to install ("problem parsing the
+# package"). Committing the .bin file is what makes it survive every future deploy.
