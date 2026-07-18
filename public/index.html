@@ -926,6 +926,22 @@ select option{background:var(--input-bg);color:var(--text)}
   </div>
 </div>
 
+<!-- Auto pop-up shown 30-60s before a running match timer hits its set length, offering a
+     one-tap way to add stoppage time -- see checkTimerAlerts()/queueStoppageTimePrompt(). Purely
+     a heads-up: tapping Close just dismisses it with no effect on the clock. -->
+<div id="stoppage-time-overlay" class="modal-overlay" style="display:none">
+  <div class="confirm-sheet">
+    <div class="confirm-title">⏱ Nearing full time</div>
+    <div class="confirm-message">The clock's almost at the set match length. Add stoppage time?</div>
+    <div class="confirm-actions" style="flex-wrap:wrap">
+      <button type="button" class="confirm-btn secondary" onclick="addStoppageTimeFromPrompt(1)">+1'</button>
+      <button type="button" class="confirm-btn secondary" onclick="addStoppageTimeFromPrompt(2)">+2'</button>
+      <button type="button" class="confirm-btn secondary" onclick="addStoppageTimeFromPrompt(5)">+5'</button>
+      <button type="button" class="confirm-btn primary" onclick="closeStoppageTimePrompt()">Close</button>
+    </div>
+  </div>
+</div>
+
 <div id="commentary-toast">
   <span class="commentary-toast-icon" id="commentary-toast-icon">⚽</span>
   <span class="commentary-toast-text" id="commentary-toast-text"></span>
@@ -2991,6 +3007,7 @@ function resumeMatchTimer(mi){
 function resetMatchTimer(mi){
   const old=state.results[mi].timer||{};
   state.results[mi].timer={running:false,accumulatedMs:0,startedAt:null,targetMinutes:old.targetMinutes||90,injuryMinutes:0};
+  delete timerAlertState['league:'+mi];
   saveState();renderMatches();
 }
 function addInjuryTime(mi,mins){
@@ -3004,6 +3021,65 @@ function setMatchLength(mi,mins){
   state.results[mi].timer.targetMinutes=parseInt(mins);
   saveState();
 }
+// --- Full-time timer alerts ---------------------------------------------------------------
+// The match clock used to just run like a stopwatch with no feedback at all. This adds two
+// automatic cues, checked once a second for every RUNNING timer (league or knockout):
+//   1. 30-60s before the clock reaches its set length (target + any stoppage time already
+//      added), pop up a one-tap "add stoppage time?" prompt -- so whoever's refereeing doesn't
+//      have to keep glancing at the clock to catch the moment.
+//   2. The instant the clock reaches that target, play a whistle and vibrate once, so there's
+//      an unmissable audible/haptic alert even if nobody's looking at the screen.
+// Purely in-memory, never persisted/synced -- keyed by the exact target duration (in ms) for
+// that match, so adding stoppage time naturally re-arms both alerts for the new, later target
+// instead of needing an explicit reset. resetMatchTimer()/resetKOMatchTimer() clear a match's
+// entry outright so restarting the same match with the same length alerts again from scratch.
+const timerAlertState={};
+let stoppageTimeQueue=[];
+let stoppageTimeActive=null; // {kind:'league'|'ko', ref} for whichever prompt is on screen now
+
+function checkTimerAlerts(kind,ref,t){
+  if(!t||!t.running)return;
+  const elapsed=computeTimerElapsedMs(t);
+  const targetMs=(t.targetMinutes+(t.injuryMinutes||0))*60000;
+  const key=kind+':'+ref;
+  const rec=timerAlertState[key]||(timerAlertState[key]={});
+  const remaining=targetMs-elapsed;
+  if(remaining>0&&remaining<=60000&&remaining>=30000&&rec.warnedForTarget!==targetMs){
+    rec.warnedForTarget=targetMs;
+    queueStoppageTimePrompt(kind,ref);
+  }
+  if(elapsed>=targetMs&&rec.beepedForTarget!==targetMs){
+    rec.beepedForTarget=targetMs;
+    playFullTimeWhistle();
+    haptic('tap');
+  }
+}
+function queueStoppageTimePrompt(kind,ref){
+  stoppageTimeQueue.push({kind,ref});
+  if(!stoppageTimeActive)showNextStoppageTimePrompt();
+}
+function showNextStoppageTimePrompt(){
+  const next=stoppageTimeQueue.shift();
+  if(!next){stoppageTimeActive=null;return;}
+  stoppageTimeActive=next;
+  document.getElementById('stoppage-time-overlay').style.display='flex';
+  playInjuryTimeChime();
+  haptic('tap');
+}
+function addStoppageTimeFromPrompt(mins){
+  if(!stoppageTimeActive)return;
+  const{kind,ref}=stoppageTimeActive;
+  if(kind==='league')addInjuryTime(ref,mins);else addKOInjuryTime(ref,mins);
+  document.getElementById('stoppage-time-overlay').style.display='none';
+  stoppageTimeActive=null;
+  showNextStoppageTimePrompt();
+}
+function closeStoppageTimePrompt(){
+  document.getElementById('stoppage-time-overlay').style.display='none';
+  stoppageTimeActive=null;
+  showNextStoppageTimePrompt();
+}
+
 setInterval(()=>{
   if(!state||!state.results)return;
   state.results.forEach((r,mi)=>{
@@ -3015,6 +3091,7 @@ setInterval(()=>{
         el.textContent=fmtClock(elapsed);
         el.classList.toggle('overtime',elapsed>=targetMs);
       }
+      checkTimerAlerts('league',mi,r.timer);
     }
   });
   if(typeof allKOMatchObjsWithPath==='function'){
@@ -3028,6 +3105,7 @@ setInterval(()=>{
           el.textContent=fmtClock(elapsed);
           el.classList.toggle('overtime',elapsed>=targetMs);
         }
+        checkTimerAlerts('ko',pathKey,m.timer);
       }
     });
   }
@@ -6170,6 +6248,7 @@ function resetKOMatchTimer(pathKey){
   const m=getMatchObjByPath(pathKey);
   const old=m.timer||{};
   m.timer={running:false,accumulatedMs:0,startedAt:null,targetMinutes:old.targetMinutes||(state.defaultMatchMinutes||90),injuryMinutes:0};
+  delete timerAlertState['ko:'+pathKey];
   saveState();renderKnockout();
 }
 function addKOInjuryTime(pathKey,mins){
