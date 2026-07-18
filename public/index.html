@@ -2127,11 +2127,38 @@ async function cancelJoinRequest(){
   loadPrivateTournament();
 }
 
+// A shared tournament's archived (completed) tournaments live inside the SAME payload doc as
+// its live/current data -- there's no separate permanent home for them. So before disbanding
+// deletes that doc, copy its tournamentHistory into the organizer's own private tournament doc
+// (tournaments/{uid}), deduped by id. This means disbanding only ever destroys the live/current
+// tournament being disbanded -- anything already archived survives in the organizer's own
+// Archive/Career going forward, same as it would if they'd archived it before ever sharing.
+async function preserveSharedHistoryOnDisband(sharedHistory){
+  if(!sharedHistory||!sharedHistory.length||!currentUser)return;
+  const docRef=fbDb.collection('tournaments').doc(currentUser.uid);
+  const snap=await docRef.get();
+  let privateState;
+  if(snap.exists&&snap.data()&&snap.data().data){
+    privateState=JSON.parse(snap.data().data);
+  }else{
+    privateState=loadLocalState()||defaultState();
+  }
+  if(!Array.isArray(privateState.tournamentHistory))privateState.tournamentHistory=[];
+  const existingIds=new Set(privateState.tournamentHistory.map(t=>t.id));
+  sharedHistory.forEach(t=>{
+    if(!existingIds.has(t.id)){
+      privateState.tournamentHistory.push(t);
+      existingIds.add(t.id);
+    }
+  });
+  await docRef.set({data:JSON.stringify(privateState),updatedAt:Date.now()},{merge:true});
+}
 function disbandSharedTournament(){
   if(!sharedMeta||sharedMeta.ownerId!==currentUser.uid)return;
-  showThemedConfirm('Permanently delete this shared tournament for everyone in it? This cannot be undone.',async()=>{
+  showThemedConfirm('Permanently delete this shared tournament for everyone in it? Any tournaments already archived will be kept in your own Archive. This cannot be undone.',async()=>{
     const code=sharedMeta.code;
     try{
+      await preserveSharedHistoryOnDisband(state.tournamentHistory||[]);
       await sharedPayloadDocRef(code).delete();
       await sharedMetaDocRef(code).delete();
     }catch(e){
