@@ -61,7 +61,12 @@ service cloud.firestore {
         // it grants read access only, never write access to the payload, so there's nothing
         // for an organizer to approve. Anyone not already a member or follower may add
         // themselves to followers (and record their own display name), nothing else.
+        // Excludes visibility=='private' tournaments -- those must go through the
+        // pendingFollowerRequests branch below instead, otherwise this branch would let anyone
+        // bypass the organizer's approval for a private tournament just by calling the plain
+        // follow path instead of the request-to-view one.
         || (
+          resource.data.visibility != 'private' &&
           !(request.auth.uid in resource.data.members) &&
           !(request.auth.uid in resource.data.followers) &&
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followers', 'followerNames']) &&
@@ -102,10 +107,15 @@ service cloud.firestore {
         // Members AND followers can read live -- this is what lets a follower see the score
         // update in real time. Only confirmed members can write -- this is what actually keeps
         // a follower (or a pending edit request) genuinely read-only/blank until they're a
-        // member, not just UI that could be bypassed.
+        // member, not just UI that could be bypassed. A third case: anyone following this
+        // tournament's OWNER as a host (hostProfiles/{ownerId}.followers) can also read it, even
+        // if they were never added to THIS specific tournament's own followers list -- this is
+        // what lets a host-follower browse that host's past tournaments (see
+        // hostProfiles/{uid}.pastTournaments), not just whichever one is currently live.
         allow read: if request.auth != null && (
           request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members ||
-          request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.followers
+          request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.followers ||
+          request.auth.uid in get(/databases/$(database)/documents/hostProfiles/$(get(/databases/$(database)/documents/shared/$(code)).data.ownerId)).data.followers
         );
         allow write: if request.auth != null &&
           request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members;

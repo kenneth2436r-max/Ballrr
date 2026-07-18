@@ -30,3 +30,7 @@ Thumbs.db
 *.keystore
 google-services.json
 GoogleService-Info.plist
+
+# APK build output isn't source -- it's copied into public/downloads/ manually before each
+# `firebase deploy`, not committed to git.
+public/downloads/

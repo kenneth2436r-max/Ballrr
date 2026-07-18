@@ -82,6 +82,14 @@ body.viewer-mode .section textarea{
   pointer-events:none;
   opacity:0.5;
 }
+/* The Lineups tab's "Select Match" dropdown just changes which already-played match's pitch
+   view you're looking at -- it doesn't edit anything, same read-only category as the help FAQ
+   toggles and player-name links exempted above. The blanket select rule above disabled it for
+   followers, which is why they couldn't switch matches to see per-match ratings at all. */
+body.viewer-mode .section select#lineup-select{
+  pointer-events:auto;
+  opacity:1;
+}
 .sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(5,2,10,0.55);z-index:9990}
 .sidebar-backdrop.open{display:block;animation:fadeIn 0.2s ease}
 .sidebar{position:fixed;top:0;left:0;bottom:0;width:78%;max-width:300px;background:var(--card-bg);z-index:9991;transform:translateX(-105%);transition:transform 0.25s cubic-bezier(.4,0,.2,1);padding:max(20px,env(safe-area-inset-top)) 14px max(20px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left));overflow-y:auto;box-shadow:6px 0 30px rgba(0,0,0,0.35)}
@@ -318,6 +326,9 @@ select option{background:var(--input-bg);color:var(--text)}
 .scorer-row{display:flex;gap:6px;align-items:center;margin-bottom:7px}
 .scorer-row select,.scorer-row input[type=text]{padding:7px 8px;border:1px solid var(--border-input);border-radius:8px;font-size:12px;background:var(--input-bg);color:var(--text);-webkit-appearance:none}
 .scorer-row select{flex:1}.scorer-row input[type=text]{flex:1.4}
+.pen-check{display:flex;align-items:center;gap:3px;flex:none;font-size:10px;font-weight:700;color:var(--text-faint);white-space:nowrap;cursor:pointer}
+.pen-check input{margin:0}
+.pen-tag{font-size:10px;font-weight:800;color:#8a5a00;background:#ffe4a3;border-radius:5px;padding:1px 5px;margin-left:4px;vertical-align:middle}
 .rem-btn{background:none;border:none;cursor:pointer;color:var(--text-faint);font-size:20px;padding:2px 6px;line-height:1}
 .scorers-label{font-size:12px;color:var(--text-muted);margin-bottom:7px;margin-top:2px}
 .add-scorer{font-size:13px;color:var(--text-muted);cursor:pointer;background:none;border:1px dashed var(--border-input);border-radius:8px;padding:7px 12px;width:100%;margin-top:2px;text-align:center}
@@ -1214,6 +1225,15 @@ function isNativeApp(){
 function nativeCrashlyticsPlugin(){
   return (isNativeApp()&&window.Capacitor.Plugins&&window.Capacitor.Plugins.FirebaseCrashlytics)||null;
 }
+// Native Share sheet + Filesystem (needed to hand the Share plugin a real file:// URI for
+// image shares) -- same "return the plugin or null" pattern as nativeCrashlyticsPlugin/
+// nativeHaptics above.
+function nativeSharePlugin(){
+  return (isNativeApp()&&window.Capacitor.Plugins&&window.Capacitor.Plugins.Share)||null;
+}
+function nativeFilesystemPlugin(){
+  return (isNativeApp()&&window.Capacitor.Plugins&&window.Capacitor.Plugins.Filesystem)||null;
+}
 const ERROR_LOG_MAX_PER_SESSION=15;
 const __errorLogState={count:0,seen:new Set()};
 function reportError(err,context){
@@ -1363,7 +1383,7 @@ fbAuth.onAuthStateChanged(user=>{
     // which then falls through to the normal consumePendingFollow() flow below. Editors
     // (join links) and the tournament owner still get the full sign-in gate, since they need a
     // persistent identity across sessions/devices -- only pure viewing is frictionless.
-    if(pendingFollowCode){
+    if(pendingFollowCode||pendingFollowHostCode){
       signInAnonymouslyForFollow();
       return;
     }
@@ -1378,6 +1398,8 @@ fbAuth.onAuthStateChanged(user=>{
     consumePendingCheckin();
   }else if(pendingFollowCode){
     consumePendingFollow();
+  }else if(pendingFollowHostCode){
+    consumePendingFollowHost();
   }else if(pendingJoinCode){
     consumePendingJoin();
   }else{
@@ -1496,6 +1518,16 @@ function handleSharedMetaSnap(code,snap){
       if(!oldPendingRequests.includes(uid)){
         const name=(sharedMeta.memberNames&&sharedMeta.memberNames[uid])||'Someone';
         fireOsNotification('🙋 Join request',name+' wants to join '+(sharedMeta.ownerName?sharedMeta.ownerName+'\'s':'your')+' tournament.',{tag:'joinreq.'+uid});
+      }
+    });
+    // Requests to VIEW a private tournament (host-follow visibility='private') never had a
+    // notification wired up -- only the edit-access join request above did. That's the "how
+    // would I know someone's waiting for approval, the app doesn't tell me" gap: a private
+    // tournament's pending viewers were silently piling up with nothing pinging the organizer.
+    (sharedMeta.pendingFollowerRequests||[]).forEach(uid=>{
+      if(!oldPendingFollowerRequests.includes(uid)){
+        const name=(sharedMeta.followerNames&&sharedMeta.followerNames[uid])||'Someone';
+        fireOsNotification('👀 View request',name+' wants to view '+(sharedMeta.ownerName?sharedMeta.ownerName+'\'s':'your')+' private tournament.',{tag:'viewreq.'+uid});
       }
     });
     (sharedMeta.followers||[]).forEach(uid=>{
@@ -1679,11 +1711,19 @@ function startSharingTournament(requireApproval,isPublic){
         const hCode=await ensureHostCode();
         if(hCode){
           const label=state.teamNames&&state.teamNames.length?state.teamNames.join(' vs '):'A new tournament';
+          const startedAt=Date.now();
+          // pastTournaments lets a host-follower browse everything this host has ever shared,
+          // not just whatever's currently live -- capped to the most recent 30 so the profile
+          // doc doesn't grow without bound over a host's lifetime.
+          const profSnap=await hostProfileDocRef(currentUser.uid).get();
+          const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
+          const pastTournaments=[{code,label,startedAt,visibility},...priorPast].slice(0,30);
           await hostProfileDocRef(currentUser.uid).set({
             latestCode:code,
             latestVisibility:visibility,
-            latestStartedAt:Date.now(),
-            latestLabel:label
+            latestStartedAt:startedAt,
+            latestLabel:label,
+            pastTournaments
           },{merge:true});
         }
       }catch(e){console.error('Could not notify followers:',e);}
@@ -1792,6 +1832,13 @@ function followSharedTournament(rawCode){
         if(!snap.exists){alert('No shared tournament found with that code. Double-check it with whoever sent it.');return;}
         const d=snap.data();
         const alreadyIn=(d.members||[]).includes(uid)||(d.followers||[]).includes(uid);
+        // Private tournaments require the organizer's approval to view -- Firestore rules
+        // reject a direct self-add to followers for these, so redirect to the request-to-view
+        // flow instead of surfacing a permission error.
+        if(!alreadyIn&&d.visibility==='private'){
+          await requestFollowApproval(code);
+          return;
+        }
         if(!alreadyIn){
           await sharedMetaDocRef(code).update({
             followers:firebase.firestore.FieldValue.arrayUnion(uid),
@@ -1904,42 +1951,49 @@ async function ensureHostCode(){
 // Follows a host by their permanent code (distinct from following one specific tournament
 // code) -- one host at a time per device, same reasoning as getActiveSharedCode(). Switching
 // to a new host first removes this device's follower entry from whoever was previously
-// followed, mirroring how following a new tournament code already works.
+// followed, mirroring how following a new tournament code already works. Returns a Promise
+// (like joinSharedTournament/followSharedTournament) so consumePendingFollowHost() -- the
+// direct-follow-link handler -- can await it before deciding what to load next.
 function followHost(rawCode){
-  if(!currentUser){alert('Sign in first to follow a host.');return;}
+  if(!currentUser){alert('Sign in first to follow a host.');return Promise.resolve();}
   const code=(rawCode||'').trim().toUpperCase();
-  if(!code)return;
+  if(!code)return Promise.resolve();
   const existing=getFollowedHost();
-  if(existing&&existing.hostCode===code){alert("You're already following this host.");return;}
-  const proceed=async()=>{
-    try{
-      const codeSnap=await hostCodeDocRef(code).get();
-      if(!codeSnap.exists){alert('No host found with that code. Double-check it with whoever sent it.');return;}
-      const hostUid=codeSnap.data().uid;
-      if(currentUser.uid===hostUid){alert("That's your own host code.");return;}
-      if(existing){
-        try{await hostProfileDocRef(existing.hostUid).update({followers:firebase.firestore.FieldValue.arrayRemove(currentUser.uid)});}catch(e){/* best-effort cleanup */}
-      }
-      const profSnap=await hostProfileDocRef(hostUid).get();
-      const hostName=(profSnap.exists&&profSnap.data().hostName)||'this host';
-      const myName=currentUser.displayName||currentUser.email||'Fan';
-      await hostProfileDocRef(hostUid).update({
-        followers:firebase.firestore.FieldValue.arrayUnion(currentUser.uid),
-        ['followerNames.'+currentUser.uid]:myName
-      });
-      setFollowedHost({hostUid,hostCode:code,hostName,lastSeenStartedAt:(profSnap.exists&&profSnap.data().latestStartedAt)||0});
-      followedHost=getFollowedHost();
-      hostFollowNotice=null;
-      startHostFollowListener();
-      renderSharedSection();
-      haptic('success');
-    }catch(e){console.error('Failed to follow host:',e);alert('Could not follow: '+(e.message||e));}
-  };
-  if(existing){
-    showThemedConfirm('You\'re currently following '+(existing.hostName||'another host')+'. Stop following them and follow this host instead?',proceed);
-  }else{
-    proceed();
-  }
+  if(existing&&existing.hostCode===code){alert("You're already following this host.");return Promise.resolve();}
+  return new Promise(resolve=>{
+    const proceed=async()=>{
+      try{
+        const codeSnap=await hostCodeDocRef(code).get();
+        if(!codeSnap.exists){alert('No host found with that code. Double-check it with whoever sent it.');return;}
+        const hostUid=codeSnap.data().uid;
+        if(currentUser.uid===hostUid){alert("That's your own host code.");return;}
+        if(existing){
+          try{await hostProfileDocRef(existing.hostUid).update({followers:firebase.firestore.FieldValue.arrayRemove(currentUser.uid)});}catch(e){/* best-effort cleanup */}
+        }
+        const profSnap=await hostProfileDocRef(hostUid).get();
+        const hostName=(profSnap.exists&&profSnap.data().hostName)||'this host';
+        const myName=currentUser.displayName||currentUser.email||'Fan';
+        await hostProfileDocRef(hostUid).update({
+          followers:firebase.firestore.FieldValue.arrayUnion(currentUser.uid),
+          ['followerNames.'+currentUser.uid]:myName
+        });
+        setFollowedHost({hostUid,hostCode:code,hostName,lastSeenStartedAt:(profSnap.exists&&profSnap.data().latestStartedAt)||0});
+        followedHost=getFollowedHost();
+        hostFollowNotice=null;
+        startHostFollowListener();
+        renderSharedSection();
+        haptic('success');
+      }catch(e){console.error('Failed to follow host:',e);alert('Could not follow: '+(e.message||e));}
+    };
+    if(existing){
+      showThemedConfirm('You\'re currently following '+(existing.hostName||'another host')+'. Stop following them and follow this host instead?',
+        async()=>{await proceed();resolve();},
+        ()=>{resolve();}
+      );
+    }else{
+      proceed().then(resolve);
+    }
+  });
 }
 
 function unfollowHost(){
@@ -2121,15 +2175,7 @@ async function shareEditLink(){
   haptic('tap');
   const url=joinLinkUrl(sharedMeta.code);
   const text='Join me editing this tournament live on Ballrr — enter scores and lineups together.';
-  if(navigator.share){
-    try{
-      await navigator.share({title:'Join this tournament on Ballrr',text,url});
-      return;
-    }catch(e){
-      if(e&&e.name==='AbortError')return;
-    }
-  }
-  window.open('https://wa.me/?text='+encodeURIComponent(text+' '+url),'_blank');
+  await nativeShare({title:'Join this tournament on Ballrr',text,url,dialogTitle:'Share join link'});
 }
 function showEditQR(){
   if(!sharedMeta){alert('Share this tournament first -- the QR works for shared tournaments.');return;}
@@ -2283,6 +2329,16 @@ function ensureShape(){
   }
   if(typeof state.draftBalanced!=='boolean')state.draftBalanced=false;
   if(typeof state.draftSnake!=='boolean')state.draftSnake=false;
+  // Set by saveTournamentToHistory() once THIS live tournament has been archived -- see the
+  // comment on computeCareerLeaderboard() for why this exists (it prevents double-counting the
+  // same tournament once as a live one and again as its own archive entry). Cleared naturally
+  // whenever resetAll() replaces state wholesale to start a new tournament.
+  if(typeof state.careerSnapshotSaved!=='boolean')state.careerSnapshotSaved=false;
+  // "Compact results" toggle -- default OFF (false) so nothing changes for tournaments that
+  // already existed before this setting did. Hides the rarer/secondary controls (penalty tag,
+  // voice log, photo/video links) from the Matches/Knockout entry cards, which otherwise got
+  // busier once the penalty-tracking feature was added. See toggleResultsCompact().
+  if(typeof state.resultsCompact!=='boolean')state.resultsCompact=false;
   if(typeof state.draftPickCount!=='number'||state.draftPickCount<0)state.draftPickCount=0;
   if(!state.ledger||typeof state.ledger!=='object')state.ledger={feeDefault:100,fees:[],expenses:[]};
   if(typeof state.ledger.feeDefault!=='number')state.ledger.feeDefault=100;
@@ -2952,13 +3008,23 @@ setInterval(()=>{
   }
 },1000);
 
+function resultsCompactToggleHtml(){
+  const compact=state.resultsCompact===true;
+  return`<div class="section-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+    <span>Results</span>
+    <label class="customko-toggle" style="margin-bottom:0;font-size:12px;font-weight:600;text-transform:none;letter-spacing:normal;color:var(--text-muted)">
+      <input type="checkbox" ${compact?'checked':''} onchange="toggleResultsCompact(this.checked)"> Compact
+    </label>
+  </div>`;
+}
 function renderMatches(){
   const c=document.getElementById('matches-container');
   if(state.formatType==='knockout'){
     c.innerHTML=renderPredictionLeaderboardHtml()+pendingCard('Knockout format','This tournament has no league fixtures — enter and follow results in the Knockout tab, and see the live bracket in the Table tab.');
     return;
   }
-  c.innerHTML=renderPredictionLeaderboardHtml()+state.fixtures.map((m,mi)=>{
+  const compact=state.resultsCompact===true;
+  c.innerHTML=renderPredictionLeaderboardHtml()+resultsCompactToggleHtml()+state.fixtures.map((m,mi)=>{
     const r=state.results[mi];
     const na=state.teamNames[m[0]],nb=state.teamNames[m[1]];
     const liveScore=calcMatchScore(state.results,mi,state.fixtures);
@@ -2972,6 +3038,7 @@ function renderMatches(){
         </select>
         ${nameFieldHtml(s.team,s.name,'scorer',{mi:mi,si:si})}
         <input type="number" min="1" max="20" value="${s.goals||1}" onchange="updateScorer(${mi},${si},'goals',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:13px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric" title="Goals scored">
+        ${compact?'':`<label class="pen-check" title="Scored from the penalty spot"><input type="checkbox" ${s.pen?'checked':''} onchange="updateScorer(${mi},${si},'pen',this.checked)"> Pen</label>`}
         <button class="rem-btn" onclick="removeScorer(${mi},${si})">×</button>
       </div>`).join('');
     const assistRows=(r.assists||[]).map((s,si)=>`
@@ -3004,13 +3071,13 @@ function renderMatches(){
       <div class="scorers-label" style="margin-top:10px">Assists: <span style="color:#aaa">name · assists · team</span></div>
       <div id="assists-${mi}">${assistRows}</div>
       <button class="add-scorer" onclick="promptAddAssist(${mi})">+ Add assist</button>
-      <button class="add-scorer" id="voice-btn-${mi}" onclick="startVoiceLog(${mi})" style="border-style:dashed">🎤 Voice log</button>
+      ${compact?'':`<button class="add-scorer" id="voice-btn-${mi}" onclick="startVoiceLog(${mi})" style="border-style:dashed">🎤 Voice log</button>`}
       ${squadHtml}
       <button class="save-btn" onclick="saveMatch(${mi})">${r.played?'Update result':'Save result (0–0 if no goals)'}</button>
       <div id="toast-${mi}" class="saved-toast">Result saved ✓</div>
       ${r.played?`<button class="share-btn" onclick="shareMatchResult(${mi})">📷 Share result</button>`:''}
       ${(r.played&&isFriendlyMode())?`<button class="share-btn" onclick="showMatchRecap(${mi})">📝 Recap</button>`:''}
-      ${r.played?mediaLinksHtml(mi,r.mediaLinks):''}
+      ${(r.played&&!compact)?mediaLinksHtml(mi,r.mediaLinks):''}
       ${predictionHtml(mi,r)}
       ${potmVoteHtml(mi,r,m)}
     </div>`;
@@ -3693,6 +3760,10 @@ function saveTournamentToHistory(){
         ...snap,
         savedAt:Date.now()
       });
+      // This live tournament's stats are now duplicated inside tournamentHistory -- flag it so
+      // Career/leaderboard math stops also counting the still-live data on top of the archive
+      // entry we just created (see computeCareerLeaderboard()'s comment for the bug this fixes).
+      state.careerSnapshotSaved=true;
       saveState();
       renderArchive();
       alert('Tournament saved to the Archive.');
@@ -4136,9 +4207,62 @@ function floatGoalBadge(originEl){
   document.body.appendChild(el);
   setTimeout(()=>el.remove(),950);
 }
+// Opens the real system share sheet (every app the user has installed -- WhatsApp, Messages,
+// email, Bluetooth, whatever -- not a single hardcoded destination) for a plain text+link share.
+// Native app: navigator.share doesn't reliably exist inside a Capacitor WebView, so this goes
+// through the native Share plugin instead, which gives a proper OS-level chooser. Web: browser
+// navigator.share does the same job. Only if neither is available at all (very old browser, or
+// the native Share plugin somehow isn't installed) does this fall back to a WhatsApp deep link,
+// since that's the one thing guaranteed to work for at least one destination.
+async function nativeShare({title,text,url,dialogTitle}){
+  const sharePlugin=nativeSharePlugin();
+  if(sharePlugin){
+    try{
+      await sharePlugin.share({title,text,url,dialogTitle:dialogTitle||title||'Share'});
+      return true;
+    }catch(e){
+      if(e&&/cancel/i.test(e.message||''))return true; // user dismissed the share sheet
+    }
+  }
+  if(navigator.share){
+    try{
+      await navigator.share({title,text,url});
+      return true;
+    }catch(e){
+      if(e&&e.name==='AbortError')return true;
+    }
+  }
+  window.open('https://wa.me/?text='+encodeURIComponent(text+(url?' '+url:'')),'_blank');
+  return false;
+}
+function blobToBase64(blob){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onloadend=()=>resolve(String(reader.result||'').split(',')[1]||'');
+    reader.onerror=reject;
+    reader.readAsDataURL(blob);
+  });
+}
 function shareCanvasAsImage(canvas,filename,shareTitle,shareText){
-  canvas.toBlob(blob=>{
+  canvas.toBlob(async blob=>{
     if(!blob)return;
+    // Native app: navigator.share/canShare with files essentially never works inside a Capacitor
+    // WebView (no bridge for File objects), which is why this silently did nothing before --
+    // write the PNG into the app's cache dir via the Filesystem plugin, then hand the resulting
+    // file:// URI to the native Share plugin so the real OS share sheet opens with the image.
+    const sharePlugin=nativeSharePlugin();
+    const fsPlugin=nativeFilesystemPlugin();
+    if(sharePlugin&&fsPlugin){
+      try{
+        const base64=await blobToBase64(blob);
+        const written=await fsPlugin.writeFile({path:filename,data:base64,directory:'CACHE'});
+        await sharePlugin.share({title:shareTitle,text:shareText,url:written.uri,dialogTitle:shareTitle});
+        return;
+      }catch(e){
+        if(e&&/cancel/i.test(e.message||''))return; // user dismissed the share sheet -- don't fall through
+        // otherwise fall through to the web-style handling below as a last resort
+      }
+    }
     const file=new File([blob],filename,{type:'image/png'});
     if(navigator.canShare && navigator.canShare({files:[file]})){
       navigator.share({files:[file],title:shareTitle,text:shareText}).catch(()=>{});
@@ -5012,6 +5136,7 @@ function setRsvpCheckedIn(id,val){
 let pendingCheckinCode=null;
 let pendingFollowCode=null;
 let pendingJoinCode=null;
+let pendingFollowHostCode=null;
 function captureCheckinParamFromUrl(){
   try{
     const params=new URLSearchParams(window.location.search);
@@ -5024,6 +5149,10 @@ function captureCheckinParamFromUrl(){
     // Same idea for the editor invite -- one link instead of relaying a code by voice/text.
     const joinCode=params.get('join');
     if(joinCode)pendingJoinCode=joinCode.trim().toUpperCase();
+    // Follow the PERSON directly (host code), instead of typing it into the "Follow a Host"
+    // box in Settings -- shareFollowHostLink() below is what generates this.
+    const followHostCode=params.get('followhost');
+    if(followHostCode)pendingFollowHostCode=followHostCode.trim().toUpperCase();
   }catch(e){}
 }
 captureCheckinParamFromUrl();
@@ -5074,6 +5203,31 @@ async function consumePendingFollow(){
       else loadPrivateTournament();
     }
   }
+}
+// Direct "follow this host" link -- one tap follows the PERSON (not a single tournament code)
+// and, if they already have something live right now, drops the visitor straight into it just
+// like tapping the "just went live" notice would (public: instant view; private: queues a view
+// request). If nothing's live right now, the follow still completes and this falls back to the
+// visitor's own private tournament instead of leaving the loading gate stuck.
+async function consumePendingFollowHost(){
+  if(!pendingFollowHostCode||!currentUser)return;
+  const code=pendingFollowHostCode;
+  pendingFollowHostCode=null;
+  await followHost(code);
+  const followed=getFollowedHost();
+  if(followed){
+    try{
+      const snap=await hostProfileDocRef(followed.hostUid).get();
+      const d=snap.exists?snap.data():null;
+      if(d&&d.latestCode){
+        if(d.latestVisibility==='private')await requestFollowApproval(d.latestCode);
+        else await followSharedTournament(d.latestCode);
+      }
+    }catch(e){console.error('Could not check for a live tournament after following host:',e);}
+  }
+  const activeCode=getActiveSharedCode();
+  if(activeCode)loadSharedTournament(activeCode);
+  else loadPrivateTournament();
 }
 // Mirrors consumePendingFollow() for the edit-access invite link.
 async function consumePendingJoin(){
@@ -5149,16 +5303,7 @@ async function shareFollowLink(){
   haptic('tap');
   const url=followLinkUrl(sharedMeta.code);
   const text=`Follow ${sharedMeta.ownerName?esc(sharedMeta.ownerName)+"'s ":''}tournament live on Ballrr — scores, ratings and your player card, updated in real time.`;
-  const fullMessage=text+' '+url;
-  if(navigator.share){
-    try{
-      await navigator.share({title:'Follow this tournament on Ballrr',text,url});
-      return;
-    }catch(e){
-      if(e&&e.name==='AbortError')return; // they opened the share sheet and cancelled -- don't fall through to WhatsApp
-    }
-  }
-  window.open('https://wa.me/?text='+encodeURIComponent(fullMessage),'_blank');
+  await nativeShare({title:'Follow this tournament on Ballrr',text,url,dialogTitle:'Share follow link'});
 }
 function openCheckinPicker(){
   if(!sharedMeta){return;}
@@ -5522,6 +5667,19 @@ function toggleDraftManualEntry(checked){
   renderDraft();
 }
 
+// Mirrors toggleDraftManualEntry() above -- "Compact" hides the busier secondary controls
+// (penalty tag checkbox, voice log button, photo/video links) on each match card in both the
+// Matches and Knockout tabs, so scoring a match stays quick and uncluttered day-to-day even
+// after the penalty-tracking feature was added. The essentials (score, scorer/assist rows,
+// save button, and the penalty shootout section when a match actually needs it) always stay
+// visible regardless of this setting -- only the occasional-use extras are hidden.
+function toggleResultsCompact(checked){
+  state.resultsCompact=checked;
+  saveState();
+  renderMatches();
+  renderKnockout();
+}
+
 function saveCaptains(){
   state.captains=state.captains.map((_,i)=>{
     const el=document.getElementById('cap-'+i);
@@ -5699,10 +5857,50 @@ function calcKOScore(matchObj,teamIds){
   return[a,b];
 }
 
+// A knockout match that ends level (after extra time) needs a penalty shootout to produce a
+// winner -- shown only once the match itself is saved AND level, right under the score. The
+// shootout score never touches the actual goal tally (m.g stays whatever it really was), it
+// only ever feeds into getRoundSlot()/shootoutWinner() for who advances.
+function koShootoutHtml(pathKey,matchObj,teamIds,liveScore){
+  if(!matchObj.played||liveScore[0]!==liveScore[1])return'';
+  const so=matchObj.shootout||{a:0,b:0,played:false};
+  const na=state.teamNames[teamIds[0]],nb=state.teamNames[teamIds[1]];
+  const winnerName=(so.played&&so.a!==so.b)?(so.a>so.b?na:nb):null;
+  return`<div class="edit-section" style="margin:10px 0;padding:10px">
+    <div class="edit-title" style="margin-top:0">🥅 Penalty Shootout</div>
+    <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Match finished level -- enter the shootout score to decide who advances (the ${liveScore[0]}–${liveScore[1]} result itself doesn't change).</p>
+    <div class="match-row">
+      <span class="team-name-s">${esc(na)}</span>
+      <input type="number" min="0" max="20" value="${so.a||0}" onchange="updateKOShootout('${pathKey}','a',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:15px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric">
+      <span class="vs">–</span>
+      <input type="number" min="0" max="20" value="${so.b||0}" onchange="updateKOShootout('${pathKey}','b',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:15px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric">
+      <span class="team-name-s right">${esc(nb)}</span>
+    </div>
+    <button class="save-btn" style="margin-top:8px" onclick="saveKOShootout('${pathKey}')">${so.played?'Update shootout':'Save shootout'}</button>
+    ${winnerName?`<div style="text-align:center;font-size:12px;font-weight:700;color:#2a7d1a;margin-top:6px">✓ ${esc(winnerName)} win on penalties ${Math.max(so.a,so.b)}–${Math.min(so.a,so.b)}</div>`:''}
+  </div>`;
+}
+function updateKOShootout(pathKey,side,val){
+  const m=getMatchObjByPath(pathKey);
+  if(!m.shootout)m.shootout={a:0,b:0,played:false};
+  m.shootout[side]=Math.max(0,parseInt(val)||0);
+  m.shootout.played=false; // editing a score un-confirms it until "Save shootout" is tapped again
+  saveState();
+}
+function saveKOShootout(pathKey){
+  const m=getMatchObjByPath(pathKey);
+  if(!m.shootout)m.shootout={a:0,b:0,played:false};
+  if(m.shootout.a===m.shootout.b){alert("Shootout scores can't be level -- someone has to win.");return;}
+  m.shootout.played=true;
+  saveState();
+  renderKnockout();
+  haptic('success');
+}
 function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
   const na=state.teamNames[teamIds[0]],nb=state.teamNames[teamIds[1]];
   const liveScore=calcKOScore(matchObj,teamIds);
   const safeId=pathKey.replace(/[^a-z0-9]/gi,'');
+  const compact=state.resultsCompact===true;
   const scorerRows=matchObj.scorers.map((s,si)=>`
     <div class="scorer-row">
       <select onchange="updateKOScorer('${pathKey}',${si},'team',this.value,[${teamIds[0]},${teamIds[1]}])">
@@ -5711,6 +5909,7 @@ function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
       </select>
       ${nameFieldHtml(s.team,s.name,'koscorer',{path:pathKey,si:si,ta:teamIds[0],tb:teamIds[1]})}
       <input type="number" min="1" max="20" value="${s.goals||1}" onchange="updateKOScorer('${pathKey}',${si},'goals',this.value,[${teamIds[0]},${teamIds[1]}])" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:13px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric" title="Goals scored">
+      ${compact?'':`<label class="pen-check" title="Scored from the penalty spot"><input type="checkbox" ${s.pen?'checked':''} onchange="updateKOScorer('${pathKey}',${si},'pen',this.checked,[${teamIds[0]},${teamIds[1]}])"> Pen</label>`}
       <button class="rem-btn" onclick="removeKOScorer('${pathKey}',${si})">×</button>
     </div>`).join('');
   const assistRows=(matchObj.assists||[]).map((s,si)=>`
@@ -5732,6 +5931,7 @@ function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
       <span class="score-display" id="ko-score-${safeId}-b">${liveScore[1]}</span>
       <span class="team-name-s right">${esc(nb)}</span>
     </div>
+    ${koShootoutHtml(pathKey,matchObj,teamIds,liveScore)}
     ${koTimerHtml(pathKey,matchObj,teamIds)}
     ${matchFeedHtml(pathKey,matchObj)}
     <div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:10px">Score is the total of goal scorers added below. No scorers yet = 0–0.</div>
@@ -5741,13 +5941,13 @@ function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
     <div class="scorers-label" style="margin-top:10px">Assists: <span style="color:#aaa">name · assists · team</span></div>
     <div>${assistRows}</div>
     <button class="add-scorer" onclick="promptAddKOAssist('${pathKey}',[${teamIds[0]},${teamIds[1]}])">+ Add assist</button>
-    <button class="add-scorer" id="ko-voice-btn-${safeId}" onclick="startKOVoiceLog('${pathKey}',[${teamIds[0]},${teamIds[1]}])" style="border-style:dashed">🎤 Voice log</button>
+    ${compact?'':`<button class="add-scorer" id="ko-voice-btn-${safeId}" onclick="startKOVoiceLog('${pathKey}',[${teamIds[0]},${teamIds[1]}])" style="border-style:dashed">🎤 Voice log</button>`}
     ${squadPickerHtml('ko',pathKey,teamIds)}
     <button class="save-btn" onclick="saveKOMatch('${pathKey}',[${teamIds[0]},${teamIds[1]}])">${matchObj.played?'Update result':'Save result (0–0 if no goals)'}</button>
     <div id="ko-toast-${safeId}" class="saved-toast">Result saved ✓</div>
     ${matchObj.played?`<button class="share-btn" onclick="shareKOMatchResult('${pathKey}',[${teamIds[0]},${teamIds[1]}])">📷 Share result</button>`:''}
     ${(matchObj.played&&isFriendlyMode())?`<button class="share-btn" onclick="showKOMatchRecap('${pathKey}',[${teamIds[0]},${teamIds[1]}])">📝 Recap</button>`:''}
-    ${matchObj.played?koMediaLinksHtml(pathKey,matchObj.mediaLinks):''}
+    ${(matchObj.played&&!compact)?koMediaLinksHtml(pathKey,matchObj.mediaLinks):''}
   </div>`;
 }
 
@@ -6101,6 +6301,14 @@ function seedTeamId(rank){
   return t[rank-1].id;
 }
 
+// A knockout match that finishes level (after extra time, in this app's model) is decided by a
+// penalty shootout instead -- the goal score itself is left as the level scoreline it actually
+// was; m.shootout:{a,b,played} just records who went through. Shared by both branches of
+// getRoundSlot() below so a shootout-decided round advances a winner exactly like a normal one.
+function shootoutWinner(m,teamA,teamB){
+  if(!m.shootout||!m.shootout.played||m.shootout.a===m.shootout.b)return null;
+  return m.shootout.a>m.shootout.b?{winner:teamA,loser:teamB}:{winner:teamB,loser:teamA};
+}
 // returns {team, decided, loser, bye, teamA, teamB}
 function getRoundSlot(round,slot){
   const order=seedOrder(bracketSize());
@@ -6112,7 +6320,11 @@ function getRoundSlot(round,slot){
     if(teamB===null)return{decided:true,team:teamA,bye:true};
     const m=state.koRounds[0][slot];
     if(!m.played)return{decided:false,team:null,teamA,teamB};
-    if(m.g[0]===m.g[1])return{decided:false,team:null,teamA,teamB};
+    if(m.g[0]===m.g[1]){
+      const so=shootoutWinner(m,teamA,teamB);
+      if(so)return{decided:true,team:so.winner,loser:so.loser,teamA,teamB,wentToShootout:true};
+      return{decided:false,team:null,teamA,teamB};
+    }
     const winner=m.g[0]>m.g[1]?teamA:teamB,loser=m.g[0]>m.g[1]?teamB:teamA;
     return{decided:true,team:winner,loser,teamA,teamB};
   }else{
@@ -6121,7 +6333,11 @@ function getRoundSlot(round,slot){
     const teamA=left.team,teamB=right.team;
     const m=state.koRounds[round][slot];
     if(!m.played)return{decided:false,team:null,teamA,teamB};
-    if(m.g[0]===m.g[1])return{decided:false,team:null,teamA,teamB};
+    if(m.g[0]===m.g[1]){
+      const so=shootoutWinner(m,teamA,teamB);
+      if(so)return{decided:true,team:so.winner,loser:so.loser,teamA,teamB,wentToShootout:true};
+      return{decided:false,team:null,teamA,teamB};
+    }
     const winner=m.g[0]>m.g[1]?teamA:teamB,loser=m.g[0]>m.g[1]?teamB:teamA;
     return{decided:true,team:winner,loser,teamA,teamB};
   }
@@ -6158,8 +6374,11 @@ function renderKnockoutTableBracket(){
       }
       const teamA=slot.teamA,teamB=slot.teamB;
       const m=state.koRounds[r][s];
-      const decided=m.played&&teamA!=null&&teamB!=null&&m.g[0]!==m.g[1];
-      const winner=decided?(m.g[0]>m.g[1]?teamA:teamB):null;
+      // Use getRoundSlot()'s own decided/team -- it already accounts for a shootout having
+      // settled a level scoreline (see shootoutWinner()), so a shootout-decided match shows the
+      // correct advancing/eliminated team here instead of looking permanently undecided.
+      const decided=slot.decided&&teamA!=null&&teamB!=null;
+      const winner=decided?slot.team:null;
       const teamRow=(tid)=>{
         if(tid==null)return'<div class="bracket-team tbd"><span>TBD</span></div>';
         let cls='bracket-team';
@@ -6167,7 +6386,7 @@ function renderKnockoutTableBracket(){
         const score=(m.played&&teamA!=null&&teamB!=null)?(tid===teamA?m.g[0]:m.g[1]):null;
         return`<div class="${cls}"><span>${esc(state.teamNames[tid])}</span>${score!=null?`<span>${score}</span>`:''}</div>`;
       };
-      html+=`<div class="bracket-match ${decided?'decided':''}">${teamRow(teamA)}${teamRow(teamB)}</div>`;
+      html+=`<div class="bracket-match ${decided?'decided':''}">${teamRow(teamA)}${teamRow(teamB)}${slot.wentToShootout?'<div style="text-align:center;font-size:9px;color:var(--text-faint);font-weight:700">pens '+m.shootout.a+'–'+m.shootout.b+'</div>':''}</div>`;
     }
     html+='</div>';
   }
@@ -6223,6 +6442,27 @@ function renderPage3TableBracket(){
   c.innerHTML=html;
 }
 
+// Renders one knockout round's header + match cards. Pulled out of renderKnockoutBracket()
+// so the Final round can be generated the same way whether it's rendered in bracket order or
+// held back to the end of the page (see renderKnockoutBracket below).
+function renderKORoundHtml(r,totalRounds){
+  let html=`<div class="ko-round-header">${roundLabel(r,totalRounds)}</div>`;
+  const numMatches=state.koRounds[r].length;
+  for(let s=0;s<numMatches;s++){
+    const slot=getRoundSlot(r,s);
+    if(slot.bye){
+      html+=pendingCard(roundLabel(r,totalRounds)+' · Match '+(s+1),esc(state.teamNames[slot.team])+' advances automatically (bye)');
+      continue;
+    }
+    if(slot.teamA===undefined||slot.teamA===null||slot.teamB===undefined||slot.teamB===null){
+      html+=pendingCard(roundLabel(r,totalRounds)+' · Match '+(s+1),'Waiting for previous round to finish');
+      continue;
+    }
+    const isFinal=(r===totalRounds-1);
+    html+=koMatchCardHtml(r+'.'+s,state.koRounds[r][s],[slot.teamA,slot.teamB],roundLabel(r,totalRounds)+' · Match '+(s+1),isFinal?'final':'');
+  }
+  return html;
+}
 function renderKnockoutBracket(){
   const c=document.getElementById('knockout-container');
   if(!groupStageComplete()){
@@ -6231,25 +6471,13 @@ function renderKnockoutBracket(){
   }
   ensureKORounds();
   const totalRounds=bracketRounds();
-  let html='';
-  for(let r=0;r<totalRounds;r++){
-    html+=`<div class="ko-round-header">${roundLabel(r,totalRounds)}</div>`;
-    const numMatches=state.koRounds[r].length;
-    for(let s=0;s<numMatches;s++){
-      const slot=getRoundSlot(r,s);
-      if(slot.bye){
-        html+=pendingCard(roundLabel(r,totalRounds)+' · Match '+(s+1),esc(state.teamNames[slot.team])+' advances automatically (bye)');
-        continue;
-      }
-      if(slot.teamA===undefined||slot.teamA===null||slot.teamB===undefined||slot.teamB===null){
-        html+=pendingCard(roundLabel(r,totalRounds)+' · Match '+(s+1),'Waiting for previous round to finish');
-        continue;
-      }
-      const isFinal=(r===totalRounds-1);
-      html+=koMatchCardHtml(r+'.'+s,state.koRounds[r][s],[slot.teamA,slot.teamB],roundLabel(r,totalRounds)+' · Match '+(s+1),isFinal?'final':'');
-    }
+  let html=resultsCompactToggleHtml();
+  // Every round except the Final renders first, in bracket order...
+  for(let r=0;r<totalRounds-1;r++){
+    html+=renderKORoundHtml(r,totalRounds);
   }
-  // third place match, when there's a semifinal round (totalRounds>=2)
+  // ...then the 3rd place match (it's traditionally played alongside/before the final, never
+  // after it)...
   if(totalRounds>=2){
     const semiRound=totalRounds-2;
     const a=getRoundSlot(semiRound,0),b=getRoundSlot(semiRound,1);
@@ -6260,6 +6488,11 @@ function renderKnockoutBracket(){
     }else{
       html+=pendingCard('3rd Place Match','Unlocks once both semifinal matches have a result (no draws, no byes involved)');
     }
+  }
+  // ...and the Final always comes last, exactly like it does in a real tournament, regardless
+  // of whether there's a 3rd place match in between.
+  if(totalRounds>=1){
+    html+=renderKORoundHtml(totalRounds-1,totalRounds);
   }
   c.innerHTML=html;
 }
@@ -6606,6 +6839,15 @@ function buildLiveCareerRows(){
   return Object.values(rows);
 }
 
+// Combines every archived tournament (state.tournamentHistory) with whatever's still being
+// played live right now. IMPORTANT: once the live tournament has been saved to the Archive
+// (state.careerSnapshotSaved -- set by saveTournamentToHistory()), its stats already exist as
+// an entry in tournamentHistory, so the live rows are skipped here -- otherwise that one
+// tournament gets counted twice (once live, once archived), which is exactly the "player shows
+// 6 tournaments when there have only been 4" bug: every player who featured in a
+// saved-but-not-yet-reset tournament had it double-counted. If you keep playing after saving
+// and want the extra matches reflected in Career immediately, save again -- otherwise it'll
+// show up the next time you save or once you start a fresh tournament.
 function computeCareerLeaderboard(){
   const agg={};
   function merge(name,team,goals,assists,cleanSheets,avg,count){
@@ -6623,7 +6865,9 @@ function computeCareerLeaderboard(){
   (state.tournamentHistory||[]).forEach(t=>{
     (t.playerStats||[]).forEach(p=>merge(p.name,p.team,p.goals,p.assists,p.cleanSheets,p.avg,p.count));
   });
-  buildLiveCareerRows().forEach(p=>merge(p.name,p.team,p.goals,p.assists,p.cleanSheets,p.avg,p.count));
+  if(!state.careerSnapshotSaved){
+    buildLiveCareerRows().forEach(p=>merge(p.name,p.team,p.goals,p.assists,p.cleanSheets,p.avg,p.count));
+  }
   return Object.values(agg).map(p=>({
     ...p,
     avg:p.ratingCount?p.ratingSum/p.ratingCount:null,
@@ -6663,8 +6907,12 @@ function computeTrophyCabinet(){
     if(topRated)award(topRated.name,topRated.team,'🏆','Player of the Tournament');
   }
   (state.tournamentHistory||[]).forEach(t=>tallyFromPlayerStats(t.playerStats));
-  const liveRows=buildLiveCareerRows();
-  if(liveRows.length)tallyFromPlayerStats(liveRows.map(r=>({...r,count:r.count||0})));
+  // Same double-counting guard as computeCareerLeaderboard() above -- skip the live rows once
+  // this tournament is already represented by its own archive entry.
+  if(!state.careerSnapshotSaved){
+    const liveRows=buildLiveCareerRows();
+    if(liveRows.length)tallyFromPlayerStats(liveRows.map(r=>({...r,count:r.count||0})));
+  }
   return Object.values(tally).map(t=>({
     name:t.name,team:t.team,wins:t.wins,icons:t._icon,
     total:Object.values(t.wins).reduce((s,n)=>s+n,0)
@@ -7534,6 +7782,7 @@ function renderHostFollowBlock(){
         <button class="pc-btn pc-btn-share" style="width:100%" onclick="openFollowedHostNotice()">${hostFollowNotice.visibility==='private'?'Ask to view':'View now'}</button>
       </div>`;
     }
+    html+='<button class="theme-btn" style="width:100%;margin-top:8px" onclick="showHostPastTournaments()">\ud83d\udcda Browse their past tournaments</button>';
     html+='<button class="pc-btn pc-btn-close" style="width:100%;margin-top:8px" onclick="unfollowHost()">Stop following</button>';
   }else{
     html+=`<div class="edit-row">
@@ -7542,9 +7791,60 @@ function renderHostFollowBlock(){
     </div>`;
   }
   html+=`<div class="edit-title" style="margin-top:16px">Your Host Code</div>
-    <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Share this once so people can follow you and get notified every time you start a new tournament.</p>
+    <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Share this once so people can follow you and get notified every time you start a new tournament -- and browse everything you've shared before.</p>
+    <button class="theme-btn" style="width:100%;margin-bottom:6px" onclick="shareFollowHostLink()">\ud83d\udce4 Share follow link</button>
     <button class="theme-btn" style="width:100%" onclick="showMyHostCode()">\ud83d\udc64 Get my host code</button>`;
   return html;
+}
+// Direct link version of following a host -- one tap instead of typing the code into the
+// "Follow a Host" box. Mirrors shareFollowLink()/shareEditLink() (nativeShare opens the real
+// OS share sheet; see consumePendingFollowHost() for how ?followhost= is consumed on load).
+function followHostLinkUrl(code){
+  return window.location.origin+window.location.pathname+'?followhost='+code;
+}
+async function shareFollowHostLink(){
+  if(!currentUser){alert('Sign in first.');return;}
+  try{
+    const code=await ensureHostCode();
+    const url=followHostLinkUrl(code);
+    const text='Follow me on Ballrr \u2014 get notified the moment I start a new tournament, and browse everything I\'ve run before.';
+    await nativeShare({title:'Follow me on Ballrr',text,url,dialogTitle:'Share follow link'});
+  }catch(e){console.error('Could not share host link:',e);alert('Could not get your host code right now.');}
+}
+// Lets a host-follower see every tournament this host has ever shared (state.tournamentHistory
+// is per-tournament, so this reads hostProfiles/{uid}.pastTournaments instead -- populated by
+// startSharingTournament()). Tapping one routes through the same public/private logic as a
+// live "just went live" notice; the Firestore rules change alongside this (payload read now
+// also allows any of the host's followers, not just that specific tournament's own followers)
+// is what makes viewing an OLD tournament actually work, not just the current one.
+async function showHostPastTournaments(){
+  if(!followedHost){alert('Follow a host first.');return;}
+  const el=document.getElementById('recap-card-content');
+  el.innerHTML='<div class="recap-title">\ud83d\udcda Past tournaments</div><p style="font-size:12px;color:var(--text-muted);text-align:center">Loading\u2026</p>';
+  document.getElementById('recap-modal').style.display='flex';
+  try{
+    const snap=await hostProfileDocRef(followedHost.hostUid).get();
+    const list=(snap.exists&&Array.isArray(snap.data().pastTournaments))?snap.data().pastTournaments:[];
+    if(!list.length){
+      el.innerHTML='<div class="recap-title">\ud83d\udcda Past tournaments</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>';
+      return;
+    }
+    const rows=list.map(t=>`
+      <div class="ledger-row">
+        <span class="ledger-name">${esc(t.label||'Tournament')} <span style="color:var(--text-faint);font-size:11px">\u00b7 ${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' \u00b7 \ud83d\udd12':''}</span></span>
+        <button class="pc-btn pc-btn-share" style="flex:none;padding:6px 10px" onclick="viewHostPastTournament('${t.code}','${t.visibility}')">View</button>
+      </div>`).join('');
+    el.innerHTML=`<div class="recap-title">\ud83d\udcda Past tournaments</div><div style="margin-bottom:14px">${rows}</div><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+  }catch(e){
+    console.error('Could not load past tournaments:',e);
+    el.innerHTML='<div class="recap-title">\ud83d\udcda Past tournaments</div><p style="font-size:12px;color:#e05252;text-align:center">Could not load -- try again.</p>';
+  }
+}
+async function viewHostPastTournament(code,visibility){
+  closeRecapModal();
+  if(getActiveSharedCode()===code){loadSharedTournament(code);return;}
+  if(visibility==='private')await requestFollowApproval(code);
+  else await followSharedTournament(code);
 }
 async function showMyHostCode(){
   if(!currentUser){alert('Sign in first.');return;}
@@ -7646,7 +7946,19 @@ function renderSharedSection(){
       <button class="rem-btn" onclick="rejectFollowerRequest('${p}')">\u00d7</button>
     </div>`).join(''):'';
 
+  // Pending join/view requests are surfaced right at the top, above even the share code --
+  // these need action from the organizer, so they shouldn't be something you have to scroll
+  // past the invite links and member chips to even discover (that, plus the missing
+  // pendingFollowerRequests notification fixed above, was the "I can't find the pending list
+  // and get no notification" complaint).
+  const pendingBanner=(pendingRows||pendingFollowerRows)?`
+    <div class="shared-pending-banner" style="margin-bottom:12px">
+      <div style="font-weight:700;margin-bottom:8px">\u23f3 Waiting on your approval</div>
+      ${pendingRows?`<div class="edit-title" style="margin-top:0">Wants to join &amp; edit</div><div>${pendingRows}</div>`:''}
+      ${pendingFollowerRows?`<div class="edit-title" style="margin-top:10px">Wants to view (private)</div><div>${pendingFollowerRows}</div>`:''}
+    </div>`:'';
   el.innerHTML=`
+    ${pendingBanner}
     <div class="shared-code-row">
       <div>
         <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px">Share code (to edit)</div>
@@ -7665,8 +7977,6 @@ function renderSharedSection(){
     <button type="button" onclick="showFollowQR()" style="width:100%;background:none;border:none;color:var(--btn-bg);font-size:12px;font-weight:600;cursor:pointer;padding:4px;margin-bottom:10px">Or show QR code to scan in person</button>
     <div class="chip-wrap" style="margin-bottom:10px">${memberChips}</div>
     ${followerChips?`<div class="edit-title" style="margin-top:10px">Following (view only)</div><div class="chip-wrap" style="margin-bottom:10px">${followerChips}</div>`:''}
-    ${pendingRows?`<div class="edit-title" style="margin-top:10px">Pending requests</div><div>${pendingRows}</div>`:''}
-    ${pendingFollowerRows?`<div class="edit-title" style="margin-top:10px">Pending viewers</div><div>${pendingFollowerRows}</div>`:''}
     <button class="pc-btn pc-btn-close" style="width:100%;margin-top:10px" onclick="leaveSharedTournament()">Leave (back to your own tournament)</button>
     ${isOwner?`<button class="pc-btn" style="width:100%;margin-top:8px;background:none;color:#e05252;border:1.5px solid #e05252" onclick="disbandSharedTournament()">Disband tournament for everyone</button>`:''}
     ${renderHostFollowBlock()}
