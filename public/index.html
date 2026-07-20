@@ -2187,6 +2187,7 @@ function disbandSharedTournament(){
       alert('Could not disband: '+(e.message||e));
       return;
     }
+    removeLivePointerFromFollowers(code); // best-effort, never blocks the disband itself
     setActiveSharedCode(null);
     sharedMeta=null;
     if(cloudUnsub){cloudUnsub();cloudUnsub=null;}
@@ -2194,6 +2195,23 @@ function disbandSharedTournament(){
     try{localStorage.removeItem(SK);}catch(e){}
     loadPrivateTournament();
   });
+}
+// Removes the "just went live" pointer entry (pushed by startSharingTournament(), identified by
+// having this code but no historyId) from hostProfiles.pastTournaments once its shared/{code}
+// doc is gone -- that entry has nothing left to point to once disbanded, so leaving it around
+// would surface as "tournament no longer available" if a follower tapped it. Archived-tournament
+// entries for this same code are untouched -- they carry their own embedded snapshot (see
+// publishArchivedTournamentToFollowers()) and stay viewable regardless of the code's fate.
+async function removeLivePointerFromFollowers(code){
+  if(!currentUser)return;
+  try{
+    const ref=hostProfileDocRef(currentUser.uid);
+    const profSnap=await ref.get();
+    const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
+    if(!priorPast.some(t=>t.code===code&&!t.historyId))return;
+    const pastTournaments=priorPast.filter(t=>!(t.code===code&&!t.historyId));
+    await ref.set({pastTournaments},{merge:true});
+  }catch(e){console.error('Could not clean up live pointer after disband:',e);}
 }
 
 function copyShareCode(){
@@ -3875,11 +3893,15 @@ function saveTournamentToHistory(){
       const historyId='t'+Date.now()+Math.random().toString(36).slice(2,7);
       const finalLabel=label.trim()||defaultLabel;
       state.tournamentHistory=state.tournamentHistory||[];
+      // visibility is tracked locally too (mirroring whatever gets published to hostProfiles)
+      // so the Archive tab can show/change it later without an extra network round-trip -- null
+      // means this tournament was never shared with followers at all (no active shared session).
       state.tournamentHistory.push({
         id:historyId,
         date:(dateStr.trim()||todayStr),
         label:finalLabel,
         ...snap,
+        visibility:sharedMeta?(sharedMeta.visibility||'public'):null,
         savedAt:Date.now()
       });
       // This live tournament's stats are now duplicated inside tournamentHistory -- flag it so
@@ -3889,11 +3911,67 @@ function saveTournamentToHistory(){
       saveState();
       renderArchive();
       alert('Tournament saved to the Archive.');
-      publishArchivedTournamentToFollowers(historyId,finalLabel,(dateStr.trim()||todayStr));
+      publishArchivedTournamentToFollowers(historyId,finalLabel,(dateStr.trim()||todayStr),snap);
     });
   });
 }
 
+// Entry point from the Archive tab's "Followers: change visibility" button. Looks up the entry's
+// CURRENT visibility straight from hostProfiles (rather than trusting a local field) so this works
+// even for tournaments saved before this feature existed, which never had a visibility recorded
+// locally at all -- only ones actually published to followers can be changed.
+async function openArchivedVisibilityControl(historyId){
+  if(!currentUser){alert('Sign in first.');return;}
+  try{
+    const ref=hostProfileDocRef(currentUser.uid);
+    const snap=await ref.get();
+    const priorPast=(snap.exists&&Array.isArray(snap.data().pastTournaments))?snap.data().pastTournaments:[];
+    const pub=priorPast.find(t=>t.historyId===historyId);
+    if(!pub){alert("This tournament was never shared with your followers, so there's nothing to change.");return;}
+    const isPrivate=pub.visibility==='private';
+    showThemedConfirm(
+      isPrivate
+        ?'Make this tournament visible to your followers without needing your approval?'
+        :'Make this tournament private? Followers will need your approval to view it, and it will go dark if your original shared session is ever disbanded.',
+      ()=>{setArchivedTournamentVisibility(historyId,isPrivate?'public':'private');}
+    );
+  }catch(e){
+    console.error('Could not check tournament visibility:',e);
+    alert('Could not check visibility right now: '+(e.message||e));
+  }
+}
+// Lets the organizer flip an already-saved Archive entry's visibility after the fact -- e.g.
+// "this tournament was shared as private, but I want followers to be able to view it now without
+// asking my approval". Works purely against hostProfiles (never touches shared/{code}), so it
+// works regardless of whether the original share session is still live or was long since
+// disbanded. Switching to public embeds a fresh snapshot (built from this entry's own already-
+// saved table/playerStats, no need to recompute anything); switching to private strips it back
+// out, since hostProfiles has no per-follower approval gate and a private tournament's data must
+// never sit there readable by any signed-in user.
+async function setArchivedTournamentVisibility(historyId,newVisibility){
+  if(!currentUser){alert('Sign in first.');return;}
+  const entry=(state.tournamentHistory||[]).find(t=>t.id===historyId);
+  if(!entry){alert('Could not find that tournament.');return;}
+  try{
+    const ref=hostProfileDocRef(currentUser.uid);
+    const snap=await ref.get();
+    const priorPast=(snap.exists&&Array.isArray(snap.data().pastTournaments))?snap.data().pastTournaments:[];
+    if(!priorPast.some(t=>t.historyId===historyId)){
+      alert("This tournament was never shared with your followers, so there's nothing to change.");
+      return;
+    }
+    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats}:null;
+    const pastTournaments=priorPast.map(t=>t.historyId===historyId?{...t,visibility:newVisibility,snapshot:trimmedSnapshot}:t);
+    await ref.set({pastTournaments},{merge:true});
+    entry.visibility=newVisibility;
+    saveState();
+    renderArchive();
+    alert(newVisibility==='public'?'Done -- followers can now view this tournament without approval.':'Done -- this tournament is private again and will need your approval to view.');
+  }catch(e){
+    console.error('Could not update tournament visibility:',e);
+    alert('Could not update visibility right now: '+(e.message||e));
+  }
+}
 function deleteHistoryEntry(id){
   showThemedConfirm('Delete this saved tournament from the archive? Its ratings will no longer count toward the balanced draft. This cannot be undone.',()=>{
     state.tournamentHistory=(state.tournamentHistory||[]).filter(t=>t.id!==id);
@@ -3910,11 +3988,28 @@ function deleteHistoryEntry(id){
 // ever grow once per NEW share code, making it look like followers "can only see the first 2
 // tournaments" when really they could only see the first 2 SHARE SESSIONS, no matter how many
 // tournaments had actually been archived inside each one. This publishes one entry per archived
-// tournament instead, tagged with the historyId so viewHostPastTournament() can jump straight to
-// that specific saved tournament (not just wherever the live session currently is). Best-effort
-// and silent on failure -- never blocks the save that already succeeded locally, and a purely
-// local/never-shared tournament (no active shared code) has nothing to publish at all.
-async function publishArchivedTournamentToFollowers(historyId,label,dateStr){
+// tournament instead.
+//
+// IMPORTANT: for PUBLIC tournaments, the entry embeds the actual tournament SNAPSHOT (table +
+// playerStats -- the same data saved into tournamentHistory, minus synergy to keep the doc
+// smaller), not just a {code,historyId} pointer into shared/{code}. An earlier version only ever
+// stored the pointer, which meant a follower could view an archived tournament right up until
+// the host disbanded that share session -- at that point shared/{code} gets deleted (see
+// disbandSharedTournament()) and the pointer became permanently dead, surfacing as "this
+// tournament is no longer available" even though the tournament's data still existed (preserved
+// into the host's own PRIVATE tournament doc, which followers have no read access to). Embedding
+// the snapshot directly in hostProfiles (already readable by any signed-in user) means viewing a
+// PUBLIC archived tournament never depends on the live share session still existing at all.
+// PRIVATE tournaments deliberately do NOT get the snapshot embedded -- hostProfiles is readable
+// by any signed-in user, with no per-follower approval gate at that level, so embedding a
+// private tournament's data there would let anyone signed in read it, bypassing the whole
+// approval flow. Private archived tournaments keep the old pointer-only behavior instead: still
+// gated behind requestFollowApproval()/the shared/{code} doc, and so still going dark once that
+// session is disbanded. That's an accepted, narrower limitation in exchange for not leaking
+// private data -- see viewHostPastTournament()'s fallback for entries with no snapshot.
+// Best-effort and silent on failure -- never blocks the save that already succeeded locally, and
+// a purely local/never-shared tournament (no active shared code) has nothing to publish at all.
+async function publishArchivedTournamentToFollowers(historyId,label,dateStr,snapshot){
   const code=getActiveSharedCode();
   if(!code||!currentUser||!sharedMeta||sharedMeta.ownerId!==currentUser.uid)return;
   try{
@@ -3923,8 +4018,12 @@ async function publishArchivedTournamentToFollowers(historyId,label,dateStr){
     const ref=hostProfileDocRef(currentUser.uid);
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
-    const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility:sharedMeta.visibility||'public',archived:true};
-    const pastTournaments=[entry,...priorPast].slice(0,60);
+    const isPrivate=sharedMeta.visibility==='private';
+    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats}:null;
+    const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility:sharedMeta.visibility||'public',archived:true,snapshot:trimmedSnapshot};
+    // Smaller cap than before (40 vs the old 60) -- each entry now carries real tournament data,
+    // not just a one-line pointer, so the doc grows faster per entry.
+    const pastTournaments=[entry,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
   }catch(e){console.error('Could not publish archived tournament to followers:',e);}
 }
@@ -7107,6 +7206,7 @@ function archiveEntryHtml(t){
           <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.output.toFixed(1)}</span>
         </div>`).join('')}`:''}
       ${t.note?`<div class="customko-hint" style="margin-top:8px">${esc(t.note)}</div>`:''}
+      <button onclick="openArchivedVisibilityControl('${t.id}')" style="width:100%;padding:9px;background:#fff;border:1px solid var(--btn-bg);border-radius:8px;color:var(--btn-bg);font-size:12px;font-weight:600;cursor:pointer;margin-top:10px">👥 Followers: change visibility</button>
       <button onclick="deleteHistoryEntry('${t.id}')" style="width:100%;padding:9px;background:#fff;border:1px solid #e24b4a;border-radius:8px;color:#a32d2d;font-size:12px;font-weight:600;cursor:pointer;margin-top:10px">Delete this entry</button>
     `:''}
   </div>`;
@@ -8162,6 +8262,10 @@ async function shareFollowHostLink(){
 // live "just went live" notice; the Firestore rules change alongside this (payload read now
 // also allows any of the host's followers, not just that specific tournament's own followers)
 // is what makes viewing an OLD tournament actually work, not just the current one.
+// Cached from the most recent showHostPastTournaments() fetch, so viewHostPastTournament() can
+// find an archived entry's embedded snapshot (see publishArchivedTournamentToFollowers()) without
+// a second Firestore read -- the list was just fetched to build this exact list of buttons.
+let lastPastTournamentsList=null;
 async function showHostPastTournaments(){
   if(!followedHost){alert('Follow a host first.');return;}
   const el=document.getElementById('recap-card-content');
@@ -8170,6 +8274,7 @@ async function showHostPastTournaments(){
   try{
     const snap=await hostProfileDocRef(followedHost.hostUid).get();
     const list=(snap.exists&&Array.isArray(snap.data().pastTournaments))?snap.data().pastTournaments:[];
+    lastPastTournamentsList=list;
     if(!list.length){
       el.innerHTML='<div class="recap-title">\ud83d\udcda Past tournaments</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>';
       return;
@@ -8187,11 +8292,24 @@ async function showHostPastTournaments(){
     el.innerHTML='<div class="recap-title">\ud83d\udcda Past tournaments</div><p style="font-size:12px;color:#e05252;text-align:center">Could not load -- try again.</p>';
   }
 }
-// historyId is only present for an "archived" (saved) entry -- once the follower has view
-// access to that entry's shared code, jump straight to that specific saved tournament in the
-// Archive tab (expanded) instead of just dropping them on whatever's currently live under that
-// code, which might be a totally different, still-in-progress tournament by now.
+// historyId is only present for an "archived" (saved) entry -- those render straight from their
+// embedded snapshot (viewArchivedTournamentSnapshot()), completely independent of whether the
+// shared/{code} session they were originally saved under still exists (a host disbanding a
+// session used to make every tournament archived inside it permanently unviewable -- "this
+// tournament is no longer available" -- even though the data itself was never actually lost).
+// A "live" entry (no historyId) still has to join/follow the actual live session, same as before.
 async function viewHostPastTournament(code,visibility,historyId){
+  if(historyId){
+    const entry=(lastPastTournamentsList||[]).find(t=>t.historyId===historyId);
+    // Only public archived tournaments carry an embedded snapshot (see
+    // publishArchivedTournamentToFollowers() for why private ones deliberately don't) -- if
+    // there's no snapshot, fall through to the old join/approval flow below instead of showing a
+    // blank "not available" card for something that might still be perfectly viewable live.
+    if(entry&&entry.snapshot){
+      viewArchivedTournamentSnapshot(entry);
+      return;
+    }
+  }
   closeRecapModal();
   if(getActiveSharedCode()!==code){
     if(visibility==='private')await requestFollowApproval(code);
@@ -8199,13 +8317,26 @@ async function viewHostPastTournament(code,visibility,historyId){
   }else{
     loadSharedTournament(code);
   }
-  if(historyId){
-    archiveExpandedId=historyId;
-    setTimeout(()=>{
-      const tab=document.querySelector('.tab[onclick*="\'archive\'"]');
-      showTab('archive',tab);
-    },400);
+}
+// Renders an archived tournament's embedded snapshot (final table + top performers) directly in
+// the recap modal -- no join/follow/network round-trip to the original shared session needed.
+function viewArchivedTournamentSnapshot(entry){
+  const el=document.getElementById('recap-card-content');
+  if(!entry||!entry.snapshot){
+    el.innerHTML=`<div class="recap-title">\ud83d\udcda Tournament</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">This tournament's details aren't available.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+    document.getElementById('recap-modal').style.display='flex';
+    return;
   }
+  const s=entry.snapshot;
+  const tableRows=(s.table||[]).map((row,i)=>`<tr><td>${i+1}</td><td style="text-align:left">${esc(row.name)}</td><td>${row.p}</td><td>${row.w}</td><td>${row.d}</td><td>${row.l}</td><td>${row.gf}</td><td>${row.ga}</td><td>${(row.gd>=0?'+':'')+row.gd}</td><td class="pts">${row.pts}</td></tr>`).join('');
+  const topRatings=(s.playerStats||[]).slice().sort((a,b)=>(b.avg||0)-(a.avg||0)).slice(0,8);
+  const ratingRows=topRatings.map(p=>`<div class="ledger-row"><span class="ledger-name">${esc(p.name)} <span style="color:var(--text-faint);font-size:11px">${esc(p.team||'')}</span></span><span style="font-size:12px;color:var(--text-muted)">${p.avg!=null?p.avg.toFixed(2):'--'}\u2b50 \u00b7 ${p.goals||0}\u26bd ${p.assists||0}\ud83c\udd70</span></div>`).join('');
+  el.innerHTML=`<div class="recap-title">\ud83d\udcda ${esc(entry.label||'Tournament')}</div>
+    <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:10px">${esc(entry.dateStr||'')}${entry.visibility==='private'?' \u00b7 \ud83d\udd12':''}</p>
+    ${tableRows?`<div class="table-wrap" style="margin-bottom:10px"><table><thead><tr><th>#</th><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>Pts</th></tr></thead><tbody>${tableRows}</tbody></table></div>`:''}
+    ${ratingRows?`<div class="edit-title" style="margin-top:0">Top Performers</div>${ratingRows}`:''}
+    <div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+  document.getElementById('recap-modal').style.display='flex';
 }
 async function showMyHostCode(){
   if(!currentUser){alert('Sign in first.');return;}
@@ -8233,7 +8364,7 @@ function renderSharedSection(){
       <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Share this tournament so friends can see and edit it too -- everyone stays in sync live.</p>
       <div class="edit-row" style="margin-bottom:6px">
         <label class="customko-toggle" style="margin-bottom:0">
-          <input type="checkbox" id="shared-visibility-public"> \ud83d\udce2 Public (notify your followers when this goes live)
+          <input type="checkbox" id="shared-visibility-public" checked> \ud83d\udce2 Public (notify your followers when this goes live)
         </label>
       </div>
       <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Public: anyone following you gets notified and can view it immediately. Private: they can still see it went live, but need your approval before they can view anything.</p>
