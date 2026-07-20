@@ -406,3 +406,54 @@ test('openArchivedVisibilityControl confirms, then flips a private published ent
   assert.strictEqual(entry.visibility, 'public');
   assert.ok(entry.snapshot, 'confirming should proceed all the way through to embedding the snapshot');
 });
+
+// Regression tests for: "why can't [followers] see what exactly I see in my archive... make it
+// like an Instagram account -- they can see my profile containing my archive (public
+// tournaments) and career stats... their archive and my archive will be separated". Followers
+// used to see a bare tournament list with no career stats at all. computeHostCareerLeaderboard()
+// mirrors computeCareerLeaderboard() (the host's own Career tab) but built entirely from the
+// host's PUBLISHED snapshots -- never the follower's own local state.tournamentHistory -- so the
+// two are never mixed together.
+test('computeHostCareerLeaderboard aggregates a player across multiple PUBLIC snapshots, and ignores private (snapshot-less) entries entirely', async () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    const pastTournaments = [
+      { historyId:'h1', visibility:'public', snapshot:{ playerStats:[{ name:'Densil', team:'Red', avg:8, count:2, goals:3, assists:1, cleanSheets:0 }] } },
+      { historyId:'h2', visibility:'public', snapshot:{ playerStats:[{ name:'Densil', team:'Red', avg:6, count:1, goals:1, assists:0, cleanSheets:1 }] } },
+      { historyId:'h3', visibility:'private', snapshot:null, code:'CODE3' },
+    ];
+    window.__results.leaderboard = computeHostCareerLeaderboard(pastTournaments);
+  `);
+  assert.strictEqual(r.leaderboard.length, 1, 'the private entry has no snapshot to aggregate, so it must contribute nothing');
+  const densil = r.leaderboard[0];
+  assert.strictEqual(densil.name, 'Densil');
+  assert.strictEqual(densil.tournaments, 2, 'appearing in 2 public tournaments should count as 2, not merged into 1 or missing the private one incorrectly');
+  assert.strictEqual(densil.goals, 4);
+  assert.strictEqual(densil.assists, 1);
+  assert.strictEqual(densil.cleanSheets, 1);
+  assert.ok(Math.abs(densil.avg - 22/3) < 0.001, 'rating should be a matches-weighted average across both tournaments: (8*2 + 6*1) / 3');
+});
+
+test('showHostPastTournaments renders the host\'s profile as a Career leaderboard (public snapshots only) plus the Archive list, kept visually separate', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan',
+    pastTournaments: [
+      { code: 'CODE1', historyId: 'h1', label: 'Summer Cup', startedAt: 2000, visibility: 'public', archived: true,
+        snapshot: { table: [], playerStats: [{ name: 'Densil', team: 'Red', avg: 8, count: 2, goals: 3, assists: 1, cleanSheets: 0 }] } },
+      { code: 'CODE2', historyId: 'h2', label: 'Private Cup', startedAt: 1000, visibility: 'private', archived: true, snapshot: null },
+    ],
+  };
+  const { window } = freshWindow({ dbStore });
+  window.localStorage.setItem('ballrr_followed_host_v1', JSON.stringify({ hostUid: 'hostUid', hostCode: 'ABCDEF', hostName: 'Aaryan', lastSeenStartedAt: 0 }));
+  runInOneEval(window, `followedHost = getFollowedHost();`);
+  await window.showHostPastTournaments();
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  const html = window.document.getElementById('recap-card-content').innerHTML;
+  assert.ok(html.includes('Career'), 'a Career section should be present');
+  assert.ok(html.includes('Archive'), 'an Archive section should be present, separate from Career');
+  assert.ok(html.includes('Densil'), 'the public tournament\'s player should show up in the Career leaderboard');
+  assert.ok(html.includes('Summer Cup'), 'the public tournament should still be listed in the Archive section');
+  assert.ok(html.includes('Private Cup'), 'the private tournament should still be listed in the Archive section (just without contributing to Career)');
+});
