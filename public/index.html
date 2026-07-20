@@ -5876,10 +5876,17 @@ async function afterFollowHostContinue(){
 }
 // A ?followhost= link now previews the host's profile first (Instagram-style) instead of
 // following instantly -- the visitor decides whether to tap Follow inside previewHostProfile().
+// Still has to bootstrap the visitor's own app shell immediately (same as every other pending-*
+// entry point) and hide the "Loading your tournaments..." gate, otherwise they'd be stuck behind
+// it until they decide to tap Follow -- the profile preview is a modal that sits on top of the
+// normal app, not a replacement for loading it.
 async function consumePendingFollowHost(){
   if(!pendingFollowHostCode||!currentUser)return;
   const code=pendingFollowHostCode;
   pendingFollowHostCode=null;
+  const activeCode=getActiveSharedCode();
+  if(activeCode)loadSharedTournament(activeCode);
+  else loadPrivateTournament();
   await previewHostProfile(code);
 }
 // Mirrors consumePendingFollow() for the edit-access invite link.
