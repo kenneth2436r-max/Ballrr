@@ -144,16 +144,45 @@ test('a follower\'s listener detects a newly-live PRIVATE tournament: tapping it
   assert.ok(!(dbStore['shared/PRIVCODE'].followers || []).includes('followerUid'), 'must not get view access before the organizer approves');
 });
 
-// Regression test for: a brand-new follower tapping a ?followhost= direct link (see
-// followHostLinkUrl()/consumePendingFollowHost()) seeing "This tournament is no longer
-// available" even though the host has nothing live right now. Root cause: hostProfiles'
-// latestCode/latestVisibility/latestStartedAt/latestLabel are set once by
-// startSharingTournament() but were never cleared when the host later disbanded that session,
-// so they kept pointing at a deleted shared/{code} doc. clearLatestLiveFromHostProfile() now
-// cleans this up on disband going forward, but consumePendingFollowHost() also defensively
-// re-checks the doc actually exists before redirecting -- belt and braces, since a first-time
-// follow should never surface a scary dead-link alert just because nothing's live right now.
-test('consumePendingFollowHost silently skips a stale/dead latestCode instead of surfacing "no longer available"', async () => {
+// Regression test for: a brand-new follower tapping a ?followhost= direct link used to be
+// auto-followed instantly with no say in the matter. It now previews the host's profile first
+// (Instagram-style) -- stats bar, tournament grid, a Follow button -- and only actually follows
+// once the visitor taps Follow (see followHostFromPreview() below).
+test('consumePendingFollowHost previews the host\'s profile with a Follow button instead of auto-following them', async () => {
+  const dbStore = {};
+  dbStore['hostCodes/ABCDEF'] = { uid: 'hostUid' };
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan', hostCode: 'ABCDEF', followers: [], followerNames: {},
+    pastTournaments: [
+      { code: 'CODE1', historyId: 'hist1', label: 'Summer Cup', startedAt: 1000, visibility: 'public', archived: true, snapshot: { table: [], playerStats: [] } },
+    ],
+  };
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'followerUid', displayName:'Fan' };
+    state = {};
+    pendingFollowHostCode = 'ABCDEF';
+    window.__followHostDone = consumePendingFollowHost();
+  `);
+  await window.__followHostDone;
+  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+
+  const html = window.document.getElementById('recap-card-content').innerHTML;
+  assert.ok(!window.__alerts.some(m => m.includes('no longer available')), 'opening a follow link must never surface the dead-session alert');
+  assert.ok(html.includes('Follow'), 'a Follow button should be offered instead of following automatically');
+  assert.ok(html.includes('Summer Cup'), 'the host\'s public archive should already be visible in the preview, before following');
+  assert.ok(!(dbStore['hostProfiles/hostUid'].followers || []).includes('followerUid'), 'previewing a profile must not add the visitor as a follower yet');
+});
+
+// Regression test for: a brand-new follower tapping Follow inside the preview seeing "This
+// tournament is no longer available" even though the host has nothing live right now. Root
+// cause: hostProfiles' latestCode/latestVisibility/latestStartedAt/latestLabel are set once by
+// startSharingTournament() but were never cleared when the host later disbanded that session, so
+// they kept pointing at a deleted shared/{code} doc. clearLatestLiveFromHostProfile() now cleans
+// this up on disband going forward, but afterFollowHostContinue() also defensively re-checks the
+// doc actually exists before redirecting -- belt and braces, since a first-time follow should
+// never surface a scary dead-link alert just because nothing's live right now.
+test('followHostFromPreview registers the follow, then silently skips a stale/dead latestCode instead of surfacing "no longer available"', async () => {
   const dbStore = {};
   dbStore['hostCodes/ABCDEF'] = { uid: 'hostUid' };
   dbStore['hostProfiles/hostUid'] = {
@@ -166,8 +195,7 @@ test('consumePendingFollowHost silently skips a stale/dead latestCode instead of
   runInOneEval(window, `
     currentUser = { uid:'followerUid', displayName:'Fan' };
     state = {};
-    pendingFollowHostCode = 'ABCDEF';
-    window.__followHostDone = consumePendingFollowHost();
+    window.__followHostDone = followHostFromPreview('ABCDEF');
   `);
   await window.__followHostDone;
   for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
@@ -176,13 +204,13 @@ test('consumePendingFollowHost silently skips a stale/dead latestCode instead of
   assert.ok((dbStore['hostProfiles/hostUid'].followers || []).includes('followerUid'), 'the host follow itself should still succeed');
 });
 
-// Regression test for: a visitor tapping a ?followhost= link, following successfully, but
-// landing on their OWN unrelated tournament with no indication anything happened or where to
-// find the host's actual archive -- looked exactly like "the follow link is broken" even though
-// the follow itself worked. consumePendingFollowHost() now auto-opens the same "Past
+// Regression test for: a visitor following successfully but landing on their OWN unrelated
+// tournament with no indication anything happened or where to find the host's actual archive --
+// looked exactly like "the follow link is broken" even though the follow itself worked.
+// followHostFromPreview() (via afterFollowHostContinue()) now auto-opens the same "Past
 // tournaments" list the "Browse their past tournaments" button opens whenever there's nothing
 // currently live to jump into instead.
-test('consumePendingFollowHost auto-opens the host\'s past tournaments list when nothing is live, instead of leaving the visitor on their own unrelated tournament', async () => {
+test('followHostFromPreview auto-opens the host\'s past tournaments list when nothing is live, instead of leaving the visitor on their own unrelated tournament', async () => {
   const dbStore = {};
   dbStore['hostCodes/ABCDEF'] = { uid: 'hostUid' };
   dbStore['hostProfiles/hostUid'] = {
@@ -196,8 +224,7 @@ test('consumePendingFollowHost auto-opens the host\'s past tournaments list when
   runInOneEval(window, `
     currentUser = { uid:'followerUid', displayName:'Fan' };
     state = {};
-    pendingFollowHostCode = 'ABCDEF';
-    window.__followHostDone = consumePendingFollowHost();
+    window.__followHostDone = followHostFromPreview('ABCDEF');
   `);
   await window.__followHostDone;
   for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
