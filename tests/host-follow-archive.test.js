@@ -36,7 +36,10 @@ test('publishArchivedTournamentToFollowers adds a distinct entry for the organiz
   assert.ok(list[0].snapshot, 'the tournament snapshot must be embedded in the published entry');
   assert.strictEqual(list[0].snapshot.table[0].name, 'Red');
   assert.strictEqual(list[0].snapshot.playerStats[0].name, 'Densil');
-  assert.strictEqual(list[0].snapshot.synergy, undefined, 'synergy is deliberately dropped to keep the hostProfiles doc smaller');
+  // Synergy is now included (previously dropped) -- followers can see top synergy duos per
+  // tournament, same as the host's own Archive entries do.
+  assert.strictEqual(list[0].snapshot.synergy[0].a, 'Densil');
+  assert.strictEqual(list[0].snapshot.synergy[0].b, 'Sam');
 });
 
 // Privacy check: hostProfiles is readable by ANY signed-in user (no per-follower approval gate
@@ -507,4 +510,112 @@ test('publishAllArchivedTournaments tells the organizer there is nothing to do w
 
   assert.strictEqual(dbStore['hostProfiles/hostUid'].pastTournaments.length, 1, 'must not create a duplicate entry');
   assert.ok(window.__alerts.some(m=>m.includes('already visible')), 'should tell the organizer there was nothing left to publish');
+});
+
+// Regression tests for: "the followers can't see the per match ratings, the synergies and other
+// stuff like player cards, the archetypes -- I want people to be able to see these features".
+// snapshotCurrentTournament() now embeds a per-player matchRatings array plus full synergy, and
+// showHostPlayerCard()/computeHostCareerArchetypes()/computeHostTrophyCabinet() reproduce the
+// same FIFA-card/archetype/trophy experience the host gets on their own Career tab, built
+// entirely from that published data -- never the follower's own local state.
+test('computeFormFromRatings mirrors computePlayerForm()\'s trend logic off a flat, already-chronological ratings array', async () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.up = computeFormFromRatings([5,5,5,8,8.5,9]);
+    window.__results.down = computeFormFromRatings([9,9,9,5,4.5,4]);
+    window.__results.steady = computeFormFromRatings([7,7,7,7,7,7]);
+    window.__results.short = computeFormFromRatings([7,8]);
+    window.__results.empty = computeFormFromRatings([]);
+  `);
+  assert.strictEqual(r.up.cls, 'up');
+  assert.strictEqual(r.down.cls, 'down');
+  assert.strictEqual(r.steady.cls, 'flat');
+  assert.strictEqual(r.short.cls, 'flat', 'too few ratings to have an "earlier" baseline just means no trend, not a crash');
+  assert.strictEqual(r.empty, null);
+});
+
+test('computeHostCareerArchetypes and computeHostTrophyCabinet mirror the host\'s own versions, fed entirely from published snapshots', async () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    const pastTournaments = [
+      { historyId:'h1', startedAt:1000, visibility:'public', snapshot:{ playerStats:[
+        { name:'Vaibhav', team:'FC Sherin', avg:9, count:2, goals:5, assists:1, cleanSheets:0 },
+        { name:'Alby', team:'Shane United', avg:7, count:2, goals:1, assists:1, cleanSheets:1 },
+      ]}},
+    ];
+    window.__results.archetypes = computeHostCareerArchetypes(pastTournaments);
+    window.__results.trophies = computeHostTrophyCabinet(pastTournaments);
+  `);
+  assert.ok(r.archetypes.some(a=>a.name==='Vaibhav'), 'the top scorer should qualify for at least one archetype');
+  const goldenBoot = r.trophies.find(t=>t.name==='Vaibhav');
+  assert.ok(goldenBoot && goldenBoot.wins['Golden Boot']===1, 'the top scorer in that tournament should be awarded the Golden Boot trophy');
+});
+
+test('showHostPlayerCard renders a FIFA-style card from the host\'s published career data, including combined stats and a form trend built from matchRatings', async () => {
+  const { window } = freshWindow();
+  runInOneEval(window, `
+    lastPastTournamentsList = [
+      { historyId:'h1', startedAt:1000, visibility:'public', snapshot:{ playerStats:[
+        { name:'Densil', team:'Mel City', position:'FWD', avg:6, count:2, goals:2, assists:0, cleanSheets:0, matchRatings:[5,6] },
+      ]}},
+      { historyId:'h2', startedAt:2000, visibility:'public', snapshot:{ playerStats:[
+        { name:'Densil', team:'Mel City', position:'FWD', avg:8.5, count:1, goals:2, assists:1, cleanSheets:0, matchRatings:[8.5] },
+      ]}},
+    ];
+    showHostPlayerCard('Densil');
+  `);
+  const html = window.document.getElementById('player-card-content').innerHTML;
+  assert.ok(html.includes('Densil'));
+  assert.ok(html.includes('FWD'));
+  assert.ok(html.includes('<span>4</span>Goals'), 'goals should be summed across both public tournaments (2+2=4)');
+  assert.ok(html.includes('pc-form'), 'a form trend should render, built from the aggregated matchRatings across both tournaments');
+});
+
+test('showHostPlayerCard tells the follower there is nothing to show for a player with no public stats', async () => {
+  const { window } = freshWindow();
+  runInOneEval(window, `
+    lastPastTournamentsList = [];
+    showHostPlayerCard('NobodyReal');
+  `);
+  assert.ok(window.__alerts.some(m=>m.includes('No public tournament stats')));
+});
+
+test('showHostPastTournaments renders a Player Archetypes strip and makes leaderboard rows tappable (opens showHostPlayerCard)', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan',
+    pastTournaments: [
+      { code: 'CODE1', historyId: 'h1', label: 'Summer Cup', startedAt: 1000, visibility: 'public', archived: true,
+        snapshot: { table: [], playerStats: [
+          { name: 'Vaibhav', team: 'FC Sherin', avg: 9, count: 3, goals: 5, assists: 3, cleanSheets: 0 },
+        ]}},
+    ],
+  };
+  const { window } = freshWindow({ dbStore });
+  window.localStorage.setItem('ballrr_followed_host_v1', JSON.stringify({ hostUid: 'hostUid', hostCode: 'ABCDEF', hostName: 'Aaryan', lastSeenStartedAt: 0 }));
+  runInOneEval(window, `followedHost = getFollowedHost();`);
+  await window.showHostPastTournaments();
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  const html = window.document.getElementById('recap-card-content').innerHTML;
+  assert.ok(html.includes('Player Archetypes'), 'an archetypes strip should render when there is enough data to qualify for one');
+  assert.ok(html.includes("showHostPlayerCard('Vaibhav')"), 'tapping a leaderboard row should open the player card, not just show plain text');
+});
+
+test('viewArchivedTournamentSnapshot shows Top Synergy duos and makes player rows tappable', async () => {
+  const entry = {
+    label: 'Summer Cup', dateStr: '2026-07-01', visibility: 'public',
+    snapshot: {
+      table: [{ name: 'Red', p: 1, w: 1, d: 0, l: 0, gf: 2, ga: 1, gd: 1, pts: 3 }],
+      playerStats: [{ name: 'Densil', team: 'Red', avg: 7.5, goals: 2, assists: 0 }],
+      synergy: [{ a: 'Densil', b: 'Sam', team: 'Red', output: 9.2, matches: 3 }],
+    },
+  };
+  const { window } = freshWindow();
+  runInOneEval(window, `viewArchivedTournamentSnapshot(${JSON.stringify(entry)});`);
+
+  const html = window.document.getElementById('recap-card-content').innerHTML;
+  assert.ok(html.includes('Top Synergy'), 'the synergy section should render');
+  assert.ok(html.includes('Sam'), 'the synergy partner should be named');
+  assert.ok(html.includes("showHostPlayerCard('Densil')"), 'the top-performer row should be tappable, opening the player card');
 });

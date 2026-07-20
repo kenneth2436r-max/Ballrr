@@ -3888,10 +3888,19 @@ function snapshotCurrentTournament(){
   Object.keys(cleanSheetTally).forEach(tid=>Object.keys(cleanSheetTally[tid]).forEach(name=>{
     cleanSheetsByKey[name+'||'+tid]=cleanSheetTally[tid][name];
   }));
+  // Per-match rating history (not just the tournament average) -- this is what lets a PUBLISHED
+  // tournament still show a "form" trend and a match-by-match breakdown on a player card later,
+  // without needing to expose anything beyond what's already computed here at save time.
+  const matchRatingsByKey={};
+  collectMatchRatings().forEach(({name,teamId,rating})=>{
+    const k=name+'||'+teamId;
+    (matchRatingsByKey[k]=matchRatingsByKey[k]||[]).push(Math.round(rating*100)/100);
+  });
   const playerStats=ratingStats.map(s=>{
     const k=s.name+'||'+s.teamId;
     return{name:s.name,team:s.team,position:s.position,avg:Math.round(s.avg*100)/100,count:s.count,
-      goals:goalsByKey[k]||0,assists:assistsByKey[k]||0,cleanSheets:cleanSheetsByKey[k]||0};
+      goals:goalsByKey[k]||0,assists:assistsByKey[k]||0,cleanSheets:cleanSheetsByKey[k]||0,
+      matchRatings:matchRatingsByKey[k]||[]};
   });
   const synergy=computeSynergy().map(p=>({a:p.a,b:p.b,team:p.team,output:Math.round(p.output*100)/100,matches:p.matches,g1:p.g1,a1:p.a1,g2:p.g2,a2:p.a2}));
   return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy};
@@ -3979,7 +3988,7 @@ async function publishArchivedTournamentNow(historyId){
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
     if(priorPast.some(t=>t.historyId===historyId))return; // already published -- nothing to do
-    const trimmedSnapshot={numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats};
+    const trimmedSnapshot={numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy};
     const newEntry={code:getActiveSharedCode()||'',historyId,label:entry.label,startedAt:entry.savedAt||Date.now(),dateStr:entry.date||'',visibility:'public',archived:true,snapshot:trimmedSnapshot};
     const pastTournaments=[newEntry,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
@@ -4015,7 +4024,7 @@ async function publishAllArchivedTournaments(){
     const newEntries=missing.map(t=>({
       code:activeCode,historyId:t.id,label:t.label,startedAt:t.savedAt||Date.now(),dateStr:t.date||'',
       visibility:'public',archived:true,
-      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats}
+      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats,synergy:t.synergy}
     }));
     const pastTournaments=[...newEntries,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
@@ -4048,7 +4057,7 @@ async function setArchivedTournamentVisibility(historyId,newVisibility){
       alert("This tournament was never shared with your followers, so there's nothing to change.");
       return;
     }
-    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats}:null;
+    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy}:null;
     const pastTournaments=priorPast.map(t=>t.historyId===historyId?{...t,visibility:newVisibility,snapshot:trimmedSnapshot}:t);
     await ref.set({pastTournaments},{merge:true});
     entry.visibility=newVisibility;
@@ -4117,7 +4126,7 @@ async function publishArchivedTournamentToFollowers(historyId,label,dateStr,snap
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
     const isPrivate=visibility==='private';
-    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats}:null;
+    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats,synergy:snapshot.synergy}:null;
     const code=sharedMeta?sharedMeta.code:(getActiveSharedCode()||'');
     const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility,archived:true,snapshot:trimmedSnapshot};
     // Smaller cap than before (40 vs the old 60) -- each entry now carries real tournament data,
@@ -5148,6 +5157,80 @@ function showPlayerCard(name){
 }
 function closePlayerCard(){
   document.getElementById('player-card-modal').style.display='none';
+}
+// Follower-facing player card -- visually the same FIFA-card layout as the host's own
+// showPlayerCard(), but entirely from the host's PUBLISHED data (lastPastTournamentsList,
+// populated by the most recent showHostPastTournaments() fetch): computeHostCareerLeaderboard()
+// for the base stats + form (built from the embedded per-match matchRatings, see
+// snapshotCurrentTournament()), computeHostCareerArchetypes() and computeHostTrophyCabinet() for
+// the rest. Never touches the follower's own local state/players, and offers no edit actions at
+// all (no rename, no local-state-based share) since none of that applies to someone else's data.
+function showHostPlayerCard(name){
+  const nm=(name||'').trim();
+  const list=lastPastTournamentsList||[];
+  const career=computeHostCareerLeaderboard(list).find(p=>p.name===nm);
+  if(!career){alert('No public tournament stats for this player yet.');return;}
+  const d={
+    name:career.name,team:career.team||'Unknown',teamId:null,
+    position:career.position||'MID',
+    goals:career.goals,assists:career.assists,cleanSheets:career.cleanSheets,
+    avg:career.avg,matches:career.matches,tournaments:career.tournaments,
+    badges:[],
+    archetypes:computeHostCareerArchetypes(list).filter(a=>a.name===nm),
+    trophies:computeHostTrophyCabinet(list).find(t=>t.name===nm)||null,
+    form:computeFormFromRatings(career.matchRatings)
+  };
+  const ovr=calcCardOVR(d);
+  const tier=cardTier(ovr,d);
+  const attrs=computeCardAttributes(d,ovr);
+  const el=document.getElementById('player-card-content');
+  el.innerHTML=`
+    <div class="fifa-card ${tier.cls}">
+      <div class="fifa-top">
+        <div class="fifa-ovrpos"><div class="fifa-ovr">${ovr}</div><div class="fifa-pos">${esc(d.position)}</div></div>
+        <div>
+          <div class="fifa-crest">⚽</div>
+          <div class="fifa-tier-tag">${tier.name}</div>
+        </div>
+      </div>
+      <div class="fifa-avatar">🧑‍🦱</div>
+      <div class="fifa-name">${esc(d.name)}</div>
+      <div class="fifa-divider"></div>
+      <div class="fifa-attrs">
+        <div class="fifa-attr-col">
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.pac}</span><span class="fifa-attr-lbl">PAC</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.sho}</span><span class="fifa-attr-lbl">SHO</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.pas}</span><span class="fifa-attr-lbl">PAS</span></div>
+        </div>
+        <div class="fifa-attr-col">
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.dri}</span><span class="fifa-attr-lbl">DRI</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.def}</span><span class="fifa-attr-lbl">DEF</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.phy}</span><span class="fifa-attr-lbl">PHY</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="pc-realstats">
+      <div class="pc-realstat"><span>${d.goals}</span>Goals</div>
+      <div class="pc-realstat"><span>${d.assists}</span>Assists</div>
+      <div class="pc-realstat"><span>${d.cleanSheets}</span>CS</div>
+      <div class="pc-realstat"><span>${d.avg!==null?d.avg.toFixed(1):'--'}</span>Rating</div>
+    </div>
+    <div class="pc-team">${esc(d.team)}${d.matches?' - '+d.matches+' match'+(d.matches===1?'':'es'):''} · ${d.tournaments} tournament${d.tournaments===1?'':'s'}</div>
+    ${d.form?`<div class="pc-form pc-form-${d.form.cls}">
+        <span class="pc-form-arrow">${d.form.arrow}</span>
+        <span class="pc-form-label">${esc(d.form.label)}</span>
+        <span class="pc-form-dots">${d.form.dots.map(r=>`<span class="pc-form-dot ${r>=7?'good':r>=5?'mid':'low'}">${r.toFixed(1)}</span>`).join('')}</span>
+      </div>`:''}
+    ${d.archetypes.length?`<div class="pc-badges">${d.archetypes.map(a=>`<span class="pc-badge-pill pc-archetype-pill">${a.icon} ${esc(a.label)}</span>`).join('')}</div>`:''}
+    ${d.trophies&&d.trophies.total?`<div class="pc-trophy-cabinet">
+        <div class="pc-trophy-title">🏆 Trophy Cabinet · ${d.trophies.total} total</div>
+        <div class="pc-trophy-row">${Object.keys(d.trophies.wins).map(label=>`
+          <div class="pc-trophy-item"><span class="pc-trophy-icon">${d.trophies.icons[label]}</span><span class="pc-trophy-count">${d.trophies.wins[label]}×</span><span class="pc-trophy-label">${esc(label)}</span></div>`).join('')}</div>
+      </div>`:''}
+    <div class="pc-actions">
+      <button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button>
+    </div>`;
+  document.getElementById('player-card-modal').style.display='flex';
 }
 function sharePlayerCard(name){
   haptic('tap');
@@ -7380,14 +7463,19 @@ function collapsePlayerStatsByName(playerStats){
   (playerStats||[]).forEach(p=>{
     const nm=(p.name||'').trim();
     if(!nm)return;
-    if(!byName[nm])byName[nm]={name:nm,team:p.team,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matches:0};
+    if(!byName[nm])byName[nm]={name:nm,team:p.team,position:p.position,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matches:0,matchRatings:[]};
     const row=byName[nm];
     row.team=p.team||row.team;
+    row.position=p.position||row.position;
     row.goals+=p.goals||0;
     row.assists+=p.assists||0;
     row.cleanSheets+=p.cleanSheets||0;
     row.matches+=p.count||0;
     if(p.avg!=null&&p.count){row.ratingSum+=p.avg*p.count;row.ratingCount+=p.count;}
+    // Only present on snapshots saved after the per-match rating history was added -- older
+    // entries just contribute an empty array here, which is fine, it only narrows the "recent
+    // form" trend to whatever data is actually available.
+    if(Array.isArray(p.matchRatings))row.matchRatings.push(...p.matchRatings);
   });
   return Object.values(byName).map(row=>({
     ...row,
@@ -8396,8 +8484,9 @@ function computeHostCareerLeaderboard(pastTournaments){
   function mergeTournament(rows){
     rows.forEach(p=>{
       const nm=p.name;
-      if(!agg[nm])agg[nm]={name:nm,team:p.team,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0};
+      if(!agg[nm])agg[nm]={name:nm,team:p.team,position:p.position,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
       agg[nm].team=p.team||agg[nm].team;
+      agg[nm].position=p.position||agg[nm].position;
       agg[nm].goals+=p.goals||0;
       agg[nm].assists+=p.assists||0;
       agg[nm].cleanSheets+=p.cleanSheets||0;
@@ -8405,9 +8494,15 @@ function computeHostCareerLeaderboard(pastTournaments){
       agg[nm].ratingSum+=p.ratingSum||0;
       agg[nm].ratingCount+=p.ratingCount||0;
       agg[nm].tournaments+=1;
+      if(Array.isArray(p.matchRatings))agg[nm].matchRatings.push(...p.matchRatings);
     });
   }
-  (pastTournaments||[]).filter(t=>t.snapshot&&Array.isArray(t.snapshot.playerStats)).forEach(t=>{
+  // Oldest tournament first, so each player's matchRatings end up in true chronological order --
+  // needed for an accurate "recent form" trend (last 3 vs earlier) on their player card.
+  const chronological=(pastTournaments||[])
+    .filter(t=>t.snapshot&&Array.isArray(t.snapshot.playerStats))
+    .slice().sort((a,b)=>(a.startedAt||0)-(b.startedAt||0));
+  chronological.forEach(t=>{
     mergeTournament(collapsePlayerStatsByName(t.snapshot.playerStats));
   });
   return Object.values(agg).map(p=>({
@@ -8415,6 +8510,79 @@ function computeHostCareerLeaderboard(pastTournaments){
     avg:p.ratingCount?p.ratingSum/p.ratingCount:null,
     matches:p.matchesTotal
   })).sort((a,b)=>(b.goals+b.assists)-(a.goals+a.assists));
+}
+// Follower-facing equivalent of computeCareerArchetypes() -- same scoring logic, just fed by
+// computeHostCareerLeaderboard() (the host's PUBLIC data only) instead of the local
+// computeCareerLeaderboard().
+function computeHostCareerArchetypes(pastTournaments){
+  const rows=computeHostCareerLeaderboard(pastTournaments);
+  const archetypes=[];
+  function topBy(filterFn,scoreFn,icon,label,detailFn){
+    const candidates=rows.filter(filterFn);
+    if(!candidates.length)return;
+    candidates.sort((a,b)=>scoreFn(b)-scoreFn(a));
+    const top=candidates[0];
+    archetypes.push({icon,label,name:top.name,team:top.team,detail:detailFn(top)});
+  }
+  topBy(p=>p.matches>=2&&p.goals>=2,p=>p.goals/p.matches,'🎯','The Poacher',p=>`${(p.goals/p.matches).toFixed(1)} goals/match`);
+  topBy(p=>p.matches>=2&&p.assists>=2,p=>p.assists/p.matches,'🅰️','The Playmaker',p=>`${(p.assists/p.matches).toFixed(1)} assists/match`);
+  topBy(p=>p.matches>=2&&p.cleanSheets>=1,p=>p.cleanSheets/p.matches,'🧱','The Wall',p=>`${p.cleanSheets} clean sheet${p.cleanSheets===1?'':'s'} in ${p.matches}`);
+  topBy(p=>p.matches>=1,p=>p.matches,'🦾','Iron Man',p=>`${p.matches} appearance${p.matches===1?'':'s'}`);
+  topBy(p=>p.matches>=3&&p.avg!=null,p=>p.avg,'⭐','The Talisman',p=>`${p.avg.toFixed(1)} avg rating`);
+  topBy(p=>p.goals>=2&&p.assists>=2&&Math.abs(p.goals-p.assists)<=1,p=>p.goals+p.assists,'🔄','Box-to-Box',p=>`${p.goals}⚽ ${p.assists}🅰 — equally dangerous both ways`);
+  return archetypes;
+}
+// Follower-facing equivalent of computeTrophyCabinet() -- tallies per-tournament Golden
+// Boot/Playmaker/Golden Glove/Player of the Tournament awards, but only across the host's
+// PUBLISHED (public, snapshot-carrying) tournaments -- exactly the same per-tournament data
+// already embedded for the Career leaderboard, no new fields required.
+function computeHostTrophyCabinet(pastTournaments){
+  const tally={};
+  function award(name,team,icon,label){
+    const nm=(name||'').trim();
+    if(!nm)return;
+    if(!tally[nm])tally[nm]={name:nm,team,wins:{}};
+    tally[nm].team=team||tally[nm].team;
+    tally[nm].wins[label]=(tally[nm].wins[label]||0)+1;
+    tally[nm]._icon=tally[nm]._icon||{};
+    tally[nm]._icon[label]=icon;
+  }
+  (pastTournaments||[]).filter(t=>t.snapshot&&Array.isArray(t.snapshot.playerStats)).forEach(t=>{
+    const rows=collapsePlayerStatsByName(t.snapshot.playerStats);
+    if(!rows.length)return;
+    let topScorer=null,topAssist=null,topKeeper=null,topRated=null;
+    rows.forEach(p=>{
+      if(p.goals>0&&(!topScorer||p.goals>topScorer.goals))topScorer=p;
+      if(p.assists>0&&(!topAssist||p.assists>topAssist.assists))topAssist=p;
+      if(p.cleanSheets>0&&(!topKeeper||p.cleanSheets>topKeeper.cleanSheets))topKeeper=p;
+      if(p.avg!=null&&p.count>=1&&(!topRated||p.avg>topRated.avg))topRated=p;
+    });
+    if(topScorer)award(topScorer.name,topScorer.team,'⚽','Golden Boot');
+    if(topAssist)award(topAssist.name,topAssist.team,'🅰','Playmaker');
+    if(topKeeper)award(topKeeper.name,topKeeper.team,'🧤','Golden Glove');
+    if(topRated)award(topRated.name,topRated.team,'🏆','Player of the Tournament');
+  });
+  return Object.values(tally).map(t=>({
+    name:t.name,team:t.team,wins:t.wins,icons:t._icon,
+    total:Object.values(t.wins).reduce((s,n)=>s+n,0)
+  })).filter(t=>t.total>0).sort((a,b)=>b.total-a.total);
+}
+// Follower-facing equivalent of computePlayerForm() -- same trend logic (last 3 ratings vs
+// everything before that), but works off a flat, already-chronological ratings array instead of
+// re-deriving it from live match data (which a follower never has access to at all).
+function computeFormFromRatings(ratings){
+  if(!ratings||!ratings.length)return null;
+  const last3=ratings.slice(-3);
+  const recentAvg=last3.reduce((s,r)=>s+r,0)/last3.length;
+  const earlier=ratings.slice(0,-3);
+  let arrow='➡️',cls='flat',label='Steady';
+  if(earlier.length){
+    const earlierAvg=earlier.reduce((s,r)=>s+r,0)/earlier.length;
+    const diff=recentAvg-earlierAvg;
+    if(diff>=0.4){arrow='📈';cls='up';label='On the rise';}
+    else if(diff<=-0.4){arrow='📉';cls='down';label='Cooling off';}
+  }
+  return{dots:last3,recentAvg,arrow,cls,label,matches:ratings.length};
 }
 // Renders the followed host's PROFILE -- their own Career leaderboard and Archive list, both
 // built purely from what they've published (hostProfiles.pastTournaments), kept visually and
@@ -8436,11 +8604,19 @@ async function showHostPastTournaments(){
     }
     const medals=['\ud83e\udd47','\ud83e\udd48','\ud83e\udd49'];
     const leaderboard=computeHostCareerLeaderboard(list).slice(0,10);
-    const careerHtml=leaderboard.length?leaderboard.map((p,i)=>`
-      <div class="scorer-item">
-        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong>${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'\u2014')} \u00b7 ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
+    // Tapping a name opens the same FIFA-style player card the host sees, just built from their
+    // published stats (showHostPlayerCard()) -- not a plain text list anymore.
+    const careerHtml=leaderboard.length?leaderboard.map((p,i)=>{
+      const safe=esc(p.name).replace(/'/g,"\\'");
+      return`
+      <div class="scorer-item" style="cursor:pointer" onclick="showHostPlayerCard('${safe}')">
+        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'\u2014')} \u00b7 ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
         <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}\u26bd ${p.assists}\ud83c\udd70${p.cleanSheets?' '+p.cleanSheets+'\ud83e\udde4':''}</span>
-      </div>`).join(''):'<div class="empty-msg">No public tournament stats yet</div>';
+      </div>`;}).join(''):'<div class="empty-msg">No public tournament stats yet</div>';
+    const archetypes=computeHostCareerArchetypes(list);
+    const archetypesHtml=archetypes.length?`<div class="section-header">Player Archetypes</div>
+      <div class="badge-strip">${archetypes.map(a=>`
+        <div class="badge-chip"><span class="badge-icon">${a.icon}</span><div><div class="badge-label">${esc(a.label)}</div><div class="badge-detail">${esc(a.name)} \u00b7 ${esc(a.detail)}</div></div></div>`).join('')}</div>`:'';
     // Newest first, same ordering the list is already stored in -- archived (saved) tournaments
     // and still-live share sessions can be interleaved here, so tag each row to tell them apart.
     const rows=list.map(t=>`
@@ -8451,6 +8627,7 @@ async function showHostPastTournaments(){
     el.innerHTML=`<div class="recap-title">\ud83d\udc64 ${esc(hostName)}'s profile</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats -- kept separate from your own.</p>
       <div class="section-header">Career \u2014 All-Time Leaderboard</div>
+      ${archetypesHtml}
       <div style="margin-bottom:14px">${careerHtml}</div>
       <div class="section-header">Archive \u2014 Saved Tournaments</div>
       <div style="margin-bottom:14px">${rows}</div>
@@ -8498,11 +8675,22 @@ function viewArchivedTournamentSnapshot(entry){
   const s=entry.snapshot;
   const tableRows=(s.table||[]).map((row,i)=>`<tr><td>${i+1}</td><td style="text-align:left">${esc(row.name)}</td><td>${row.p}</td><td>${row.w}</td><td>${row.d}</td><td>${row.l}</td><td>${row.gf}</td><td>${row.ga}</td><td>${(row.gd>=0?'+':'')+row.gd}</td><td class="pts">${row.pts}</td></tr>`).join('');
   const topRatings=(s.playerStats||[]).slice().sort((a,b)=>(b.avg||0)-(a.avg||0)).slice(0,8);
-  const ratingRows=topRatings.map(p=>`<div class="ledger-row"><span class="ledger-name">${esc(p.name)} <span style="color:var(--text-faint);font-size:11px">${esc(p.team||'')}</span></span><span style="font-size:12px;color:var(--text-muted)">${p.avg!=null?p.avg.toFixed(2):'--'}\u2b50 \u00b7 ${p.goals||0}\u26bd ${p.assists||0}\ud83c\udd70</span></div>`).join('');
+  // Tapping a name opens the same follower-facing player card as the Career leaderboard above.
+  const ratingRows=topRatings.map(p=>{
+    const safe=esc(p.name).replace(/'/g,"\\'");
+    return`<div class="ledger-row" style="cursor:pointer" onclick="showHostPlayerCard('${safe}')"><span class="ledger-name">${esc(p.name)} <span style="color:var(--text-faint);font-size:11px">${esc(p.team||'')}</span></span><span style="font-size:12px;color:var(--text-muted)">${p.avg!=null?p.avg.toFixed(2):'--'}\u2b50 \u00b7 ${p.goals||0}\u26bd ${p.assists||0}\ud83c\udd70</span></div>`;
+  }).join('');
+  const topSynergy=(s.synergy||[]).slice().sort((a,b)=>b.output-a.output).slice(0,3);
+  const synergyRows=topSynergy.map(p=>`
+    <div class="scorer-item">
+      <div><strong>${esc(p.a)}</strong> &amp; <strong>${esc(p.b)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team)})</span></div>
+      <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.output.toFixed(1)}</span>
+    </div>`).join('');
   el.innerHTML=`<div class="recap-title">\ud83d\udcda ${esc(entry.label||'Tournament')}</div>
     <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:10px">${esc(entry.dateStr||'')}${entry.visibility==='private'?' \u00b7 \ud83d\udd12':''}</p>
     ${tableRows?`<div class="table-wrap" style="margin-bottom:10px"><table><thead><tr><th>#</th><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>Pts</th></tr></thead><tbody>${tableRows}</tbody></table></div>`:''}
     ${ratingRows?`<div class="edit-title" style="margin-top:0">Top Performers</div>${ratingRows}`:''}
+    ${synergyRows?`<div class="section-header">Top Synergy</div>${synergyRows}`:''}
     <div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
   document.getElementById('recap-modal').style.display='flex';
 }
