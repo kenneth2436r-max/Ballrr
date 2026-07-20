@@ -59,6 +59,13 @@
 html{background:var(--bg)}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:15px;min-height:100vh;min-height:100dvh;transition:background 0.2s ease,color 0.2s ease}
 .app{max-width:460px;margin:0 auto;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+/* Phones are almost always narrower than 460px anyway, so this cap never even kicks in there --
+   it only ever mattered on tablets/desktop, where it left the whole app boxed into a narrow
+   column with large empty margins on both sides ("limited to the middle of the screen"). Widen
+   it in steps on wider viewports so it actually uses the available space there, while leaving
+   the phone experience completely untouched. */
+@media (min-width:700px){.app{max-width:680px}}
+@media (min-width:1000px){.app{max-width:900px}}
 h1{font-size:20px;font-weight:600;margin-bottom:4px}
 .sub{font-size:13px;color:var(--text-muted);margin-bottom:16px}
 .app-header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
@@ -119,9 +126,14 @@ button:active,.tab:active,.chip button:active{transform:scale(0.94)}
 .badge-icon{font-size:22px}
 .badge-label{font-size:12px;font-weight:700;color:var(--text)}
 .badge-detail{font-size:11px;color:var(--text-muted)}
-.modal-overlay{position:fixed;inset:0;background:rgba(10,5,20,0.65);display:flex;align-items:center;justify-content:center;z-index:9998;padding:20px;animation:fadeIn 0.2s ease}
+.modal-overlay{position:fixed;inset:0;background:rgba(10,5,20,0.65);display:flex;align-items:center;justify-content:center;z-index:9998;padding:20px;overflow-y:auto;animation:fadeIn 0.2s ease}
+/* Opened FROM another modal (e.g. tapping a player in the Career leaderboard while the profile
+   modal is still open) -- without this it sits earlier in the DOM than #recap-modal, so at the
+   same z-index it rendered BEHIND it instead of on top, making the card look like it "didn't
+   open" even though it had. */
+#player-card-modal{z-index:9999}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-.player-card{width:100%;max-width:300px;display:flex;flex-direction:column;align-items:center;animation:cardPop 0.35s cubic-bezier(.34,1.56,.64,1)}
+.player-card{width:100%;max-width:300px;max-height:85vh;overflow-y:auto;display:flex;flex-direction:column;align-items:center;animation:cardPop 0.35s cubic-bezier(.34,1.56,.64,1)}
 @keyframes cardPop{0%{opacity:0;transform:scale(0.85) translateY(20px)}100%{opacity:1;transform:scale(1) translateY(0)}}
 .fifa-card{position:relative;width:280px;height:412px;clip-path:polygon(10% 0%,90% 0%,100% 10%,100% 78%,50% 100%,0% 78%,0% 10%);padding:20px 18px 26px;box-shadow:0 20px 50px rgba(0,0,0,0.5);overflow:hidden}
 .fifa-card::before{content:'';position:absolute;top:0;left:-30%;width:60%;height:100%;background:linear-gradient(115deg,rgba(255,255,255,0) 30%,rgba(255,255,255,0.35) 48%,rgba(255,255,255,0) 66%);animation:fifaShine 2.6s ease-in-out infinite;pointer-events:none}
@@ -196,7 +208,7 @@ button:active,.tab:active,.chip button:active{transform:scale(0.94)}
 .tier-silver .fifa-ovr,.tier-silver .fifa-pos,.tier-silver .fifa-name,.tier-silver .fifa-attr-val,.tier-silver .fifa-attr-lbl,.tier-silver .fifa-tier-tag{color:#33333d}
 .tier-bronze .fifa-ovr,.tier-bronze .fifa-pos,.tier-bronze .fifa-name,.tier-bronze .fifa-attr-val,.tier-bronze .fifa-attr-lbl,.tier-bronze .fifa-tier-tag{color:#3a2410}
 .trophy-card{width:100%;max-width:320px;background:linear-gradient(155deg,#2d1a54,#1a1030);border-radius:20px;padding:32px 24px;color:#fff;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,0.4);animation:cardPop 0.4s cubic-bezier(.34,1.56,.64,1)}
-.recap-card{width:100%;max-width:340px;background:var(--card-bg,#221a3a);border-radius:16px;padding:22px 20px;color:var(--text,#fff);box-shadow:0 20px 60px rgba(0,0,0,0.4);animation:cardPop 0.3s cubic-bezier(.34,1.56,.64,1)}
+.recap-card{width:100%;max-width:340px;max-height:85vh;overflow-y:auto;background:var(--card-bg,#221a3a);border-radius:16px;padding:22px 20px;color:var(--text,#fff);box-shadow:0 20px 60px rgba(0,0,0,0.4);animation:cardPop 0.3s cubic-bezier(.34,1.56,.64,1)}
 .recap-title{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--btn-bg,#A78BFA);margin-bottom:12px;text-align:center}
 .recap-body{font-size:14px;line-height:1.6;margin-bottom:16px}
 .recap-actions{display:flex;gap:8px}
