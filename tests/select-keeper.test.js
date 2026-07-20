@@ -76,3 +76,30 @@ test('a per-match Lineup swap (posOverrides) still takes priority over the perma
   assert.strictEqual(r.bobMatchPos, 'GK');
   assert.strictEqual(r.alicePermanentPos, 'GK', "a one-match swap must not change Alice's permanent keeper status for future matches");
 });
+
+// Regression test for: "the captain's name doesn't show up in the set keeper box". Root cause:
+// the dropdown and badge were built from `picks` (state.players filtered by team) only, but a
+// captain is set by name directly in the Captains section and doesn't have to also be drafted
+// onto state.players -- fullTeamRoster() already knows to fall back to including the captain,
+// the roster-card just wasn't using it for the keeper controls.
+test('the Set Keeper dropdown includes the team captain, not just drafted pool players', () => {
+  // draft-container must be a real, document-attached element -- see the same note in
+  // tests/team-names-in-draft.test.js. The harness's auto-stub for a missing id is a detached
+  // div, so a nested id inside its innerHTML (like keeper-select-0) is otherwise unreachable via
+  // a later document.getElementById() call even though it's really there in the HTML string.
+  const { window } = freshWindow({ extraHtml: '<div id="draft-container"></div>' });
+  const r = runInOneEval(window, `
+    drawWheel=function(){};
+    state = {
+      numTeams:1, teamNames:['Reds'], captains:['Alice'], goalkeepers:[''],
+      players:[{name:'Bob',team:0}], playerPool:[], rotationalPool:[], playerDB:[],
+      draftTurnIndex:0, draftBalanced:false, draftSnake:false, draftPickCount:0,
+      draftManualEntryVisible:true, mode:'friendly', tournamentHistory:[],
+      results:[], fixtures:[], customKO:{enabled:false,stages:[]}, koRounds:null, page3:null
+    };
+    renderDraft();
+    window.__results.selectHtml = document.getElementById('keeper-select-0').innerHTML;
+  `);
+  assert.ok(r.selectHtml.includes('Alice'), 'the captain must be selectable as keeper even though they were never separately drafted onto state.players');
+  assert.ok(r.selectHtml.includes('Bob'), 'a normally-drafted player should still be listed too');
+});

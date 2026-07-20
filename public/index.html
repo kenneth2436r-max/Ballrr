@@ -835,12 +835,6 @@ select option{background:var(--input-bg);color:var(--text)}
     <div class="format-info" id="format-info"></div>
     <button class="save-btn" onclick="applyFormat()">Apply Format (resets results)</button>
   </div>
-  <div class="edit-section">
-    <div class="edit-title">Rename Teams</div>
-    <div id="team-name-inputs"></div>
-    <button class="save-btn" onclick="saveTeamNames()" style="margin-top:4px">Save Names</button>
-    <div id="names-saved" class="saved-toast">Names saved ✓</div>
-  </div>
   <div class="edit-section" id="settings-customko-section">
     <div class="edit-title">Custom Knockout Format</div>
     <div id="customko-container"></div>
@@ -1732,11 +1726,13 @@ function startSharingTournament(requireApproval,isPublic){
           const label=state.teamNames&&state.teamNames.length?state.teamNames.join(' vs '):'A new tournament';
           const startedAt=Date.now();
           // pastTournaments lets a host-follower browse everything this host has ever shared,
-          // not just whatever's currently live -- capped to the most recent 30 so the profile
-          // doc doesn't grow without bound over a host's lifetime.
+          // not just whatever's currently live -- capped to the most recent 60 (also grows one
+          // entry per archived tournament now, see publishArchivedTournamentToFollowers(), so
+          // the cap is a bit more generous than before) so the profile doc doesn't grow without
+          // bound over a host's lifetime.
           const profSnap=await hostProfileDocRef(currentUser.uid).get();
           const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
-          const pastTournaments=[{code,label,startedAt,visibility},...priorPast].slice(0,30);
+          const pastTournaments=[{code,label,startedAt,visibility},...priorPast].slice(0,60);
           await hostProfileDocRef(currentUser.uid).set({
             latestCode:code,
             latestVisibility:visibility,
@@ -3876,11 +3872,13 @@ function saveTournamentToHistory(){
   const defaultLabel=snap.teamNames.join(' vs ');
   showThemedPrompt('Name this tournament (shown in the Archive):',defaultLabel,(label)=>{
     showThemedPrompt('Date played (YYYY-MM-DD):',todayStr,(dateStr)=>{
+      const historyId='t'+Date.now()+Math.random().toString(36).slice(2,7);
+      const finalLabel=label.trim()||defaultLabel;
       state.tournamentHistory=state.tournamentHistory||[];
       state.tournamentHistory.push({
-        id:'t'+Date.now()+Math.random().toString(36).slice(2,7),
+        id:historyId,
         date:(dateStr.trim()||todayStr),
-        label:(label.trim()||defaultLabel),
+        label:finalLabel,
         ...snap,
         savedAt:Date.now()
       });
@@ -3891,6 +3889,7 @@ function saveTournamentToHistory(){
       saveState();
       renderArchive();
       alert('Tournament saved to the Archive.');
+      publishArchivedTournamentToFollowers(historyId,finalLabel,(dateStr.trim()||todayStr));
     });
   });
 }
@@ -3900,7 +3899,47 @@ function deleteHistoryEntry(id){
     state.tournamentHistory=(state.tournamentHistory||[]).filter(t=>t.id!==id);
     saveState();
     renderArchive();
+    unpublishArchivedTournamentFromFollowers(id);
   });
+}
+
+// Lets host-followers browse every tournament this host has actually PLAYED AND SAVED, not just
+// the handful of times they hit "Share this tournament" -- a host commonly keeps the same shared
+// code/session running across many separate tournaments (archiving one, resetting, starting the
+// next), so hostProfiles.pastTournaments (populated by startSharingTournament()) used to only
+// ever grow once per NEW share code, making it look like followers "can only see the first 2
+// tournaments" when really they could only see the first 2 SHARE SESSIONS, no matter how many
+// tournaments had actually been archived inside each one. This publishes one entry per archived
+// tournament instead, tagged with the historyId so viewHostPastTournament() can jump straight to
+// that specific saved tournament (not just wherever the live session currently is). Best-effort
+// and silent on failure -- never blocks the save that already succeeded locally, and a purely
+// local/never-shared tournament (no active shared code) has nothing to publish at all.
+async function publishArchivedTournamentToFollowers(historyId,label,dateStr){
+  const code=getActiveSharedCode();
+  if(!code||!currentUser||!sharedMeta||sharedMeta.ownerId!==currentUser.uid)return;
+  try{
+    const hCode=await ensureHostCode();
+    if(!hCode)return;
+    const ref=hostProfileDocRef(currentUser.uid);
+    const profSnap=await ref.get();
+    const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
+    const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility:sharedMeta.visibility||'public',archived:true};
+    const pastTournaments=[entry,...priorPast].slice(0,60);
+    await ref.set({pastTournaments},{merge:true});
+  }catch(e){console.error('Could not publish archived tournament to followers:',e);}
+}
+// Mirrors publishArchivedTournamentToFollowers() -- removes the matching entry (if any) so a
+// deleted archive entry doesn't keep showing up for followers. Best-effort, same reasoning.
+async function unpublishArchivedTournamentFromFollowers(historyId){
+  if(!currentUser)return;
+  try{
+    const ref=hostProfileDocRef(currentUser.uid);
+    const profSnap=await ref.get();
+    const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
+    if(!priorPast.some(t=>t.historyId===historyId))return;
+    const pastTournaments=priorPast.filter(t=>t.historyId!==historyId);
+    await ref.set({pastTournaments},{merge:true});
+  }catch(e){console.error('Could not remove archived tournament from followers list:',e);}
 }
 
 /* ---------- MATCH LINEUP / PITCH VIEW ---------- */
@@ -5531,6 +5570,22 @@ function renderDraft(){
   // this tab and paste each team's full roster directly into that team's card instead.
   html+=`<div class="customko-hint" style="margin-bottom:10px">Already have your teams? You don't need the wheel or the pool above -- scroll to the <b>Draft Board</b> at the bottom of this tab and paste each team's full roster directly into that team's card. Fixtures and results work the same either way.</div>`;
 
+  // Team Names -- moved here from Settings so everything about setting a team up (name, crest,
+  // captain, keeper, roster) lives in one place instead of being split across two tabs.
+  html+=`<div class="edit-section">
+    <div class="edit-title">Team Names</div>
+    ${state.teamNames.map((tn,i)=>`
+      <div class="edit-row">
+        <label class="edit-label">Team ${i+1}</label>
+        <select id="tcrest-${i}" style="width:56px;flex:none;text-align:center;font-size:16px">
+          ${TEAM_CRESTS.map(cr=>`<option value="${cr}" ${cr===(state.teamCrests&&state.teamCrests[i]||'')?'selected':''}>${cr||'—'}</option>`).join('')}
+        </select>
+        <input type="text" id="tname-${i}" value="${esc(tn)}" placeholder="Team ${i+1}" maxlength="20">
+      </div>`).join('')}
+    <button class="save-btn" onclick="saveTeamNames()" style="margin-top:4px">Save Names</button>
+    <div id="names-saved" class="saved-toast">Names saved ✓</div>
+  </div>`;
+
   // Captains -- goalkeepers are now identified purely via the Player Positions tags below,
   // so there's no separate per-team Keeper field to maintain.
   html+=`<div class="edit-section">
@@ -5649,21 +5704,26 @@ function renderDraft(){
     ${state.teamNames.map((tn,ti)=>{
       const picks=state.players.map((p,gi)=>({...p,gi})).filter(p=>p.team===ti);
       const avg=teamAvgRating(ti);
-      const keeperPick=picks.find(p=>getPlayerPosition(p.name)==='GK');
+      // fullTeamRoster(ti) (not just picks/state.players) so the Set Keeper dropdown and badge
+      // include the captain too -- a captain is set by name directly in the Captains section
+      // above and doesn't have to also go through the wheel/draft, so they'd otherwise never be
+      // selectable as their team's keeper.
+      const keeperRoster=fullTeamRoster(ti);
+      const keeperName=keeperRoster.find(n=>getPlayerPosition(n)==='GK');
       return`<div class="roster-card">
         <div class="rc-head">
           <span class="rc-team">${esc(tn)}</span>
           <span style="display:flex;gap:6px;align-items:center">
             ${avg!=null?ratingBadge(avg):''}
             ${state.captains[ti]?`<span class="rc-cap">Cap. ${esc(state.captains[ti])}</span>`:''}
-            ${keeperPick?`<span class="rc-cap" style="background:#E08A2A22;color:#E08A2A">🧤 ${esc(keeperPick.name)}</span>`:''}
+            ${keeperName?`<span class="rc-cap" style="background:#E08A2A22;color:#E08A2A">🧤 ${esc(keeperName)}</span>`:''}
           </span>
         </div>
         ${picks.length?`<div class="chip-wrap">${picks.map(p=>`<span class="chip">${esc(p.name)}<button onclick="removeDraftedPlayer(${p.gi})" title="Send back to pool">×</button></span>`).join('')}</div>`:'<div class="rc-empty">No players drafted yet</div>'}
         ${showManualEntry?`<div class="pool-add-row" style="margin-top:8px">
           <select id="keeper-select-${ti}" style="flex:1">
             <option value="">— No keeper set —</option>
-            ${picks.map(p=>`<option value="${esc(p.name)}" ${getPlayerPosition(p.name)==='GK'?'selected':''}>${esc(p.name)}</option>`).join('')}
+            ${keeperRoster.map(n=>`<option value="${esc(n)}" ${getPlayerPosition(n)==='GK'?'selected':''}>${esc(n)}${state.captains[ti]&&state.captains[ti].trim()===n?' (Captain)':''}</option>`).join('')}
           </select>
           <button onclick="const sel=document.getElementById('keeper-select-${ti}');setTeamKeeper(${ti},sel.value)" title="Fixes this player as ${esc(tn)}'s keeper for every match, so you don't have to place them in goal manually in the Lineup tab. If the keeper changes mid-tournament, use the Lineup tab's swap instead for that one match, or pick a new keeper here to change it for good.">🧤 Set Keeper</button>
         </div>
@@ -6013,14 +6073,69 @@ function calcKOScore(matchObj,teamIds){
 // winner -- shown only once the match itself is saved AND level, right under the score. The
 // shootout score never touches the actual goal tally (m.g stays whatever it really was), it
 // only ever feeds into getRoundSlot()/shootoutWinner() for who advances.
+// Knockout matches can be tied after full time -- real tournaments then go to extra time, and
+// only fall back to penalties if STILL level after that (some go straight to penalties instead,
+// so both options are offered). This used to jump straight from "level scoreline" to the
+// penalty shootout with no way to record that extra time happened first. Extra-time goals don't
+// need their own separate tally -- they're added the exact same way as any other goal, via the
+// existing "+ Add scorer" button; this just gates WHEN the shootout is offered, and labels how
+// the match was actually decided. League/group-stage matches never call this at all (this whole
+// function is only ever reached from koMatchCardHtml, the knockout-only match card), so a
+// group-stage draw is completely unaffected.
+function koExtraTimeHtml(pathKey,matchObj,liveScore){
+  if(!matchObj.played||liveScore[0]!==liveScore[1])return'';
+  const et=matchObj.extraTime||{played:false,skipped:false};
+  if(et.played||et.skipped)return''; // already chose a path -- nothing more to ask
+  return`<div class="edit-section" style="margin:10px 0;padding:10px">
+    <div class="edit-title" style="margin-top:0">⚖ Level after full time</div>
+    <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Did this go to extra time, or straight to penalties?</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="theme-btn" style="flex:1" onclick="setKOExtraTime('${pathKey}',true)">⏱ Extra Time</button>
+      <button class="theme-btn" style="flex:1" onclick="setKOExtraTime('${pathKey}',false)">🥅 Straight to Penalties</button>
+    </div>
+  </div>`;
+}
+function setKOExtraTime(pathKey,wentToExtraTime){
+  const m=getMatchObjByPath(pathKey);
+  if(!m.extraTime)m.extraTime={played:false,skipped:false};
+  if(wentToExtraTime)m.extraTime.played=true;else m.extraTime.skipped=true;
+  saveState();
+  renderKnockout();
+  haptic('tap');
+}
+// Undoes an extra-time/penalties tap that was a misclick -- only offered before any shootout
+// score has actually been entered for it, since reverting past that point would leave a
+// recorded shootout result orphaned from a match that's no longer marked as needing one.
+function resetKOExtraTimeChoice(pathKey){
+  const m=getMatchObjByPath(pathKey);
+  m.extraTime={played:false,skipped:false};
+  saveState();
+  renderKnockout();
+}
+// Small status note once a path's been chosen -- "still level, in extra time" (prompts the ref
+// to keep adding any further goals below as normal), "decided in extra time" once it's no
+// longer level, or "went straight to penalties" -- so the result clearly shows how the match was
+// actually settled. Includes a small revert link while nothing's been entered yet that a
+// reversion would orphan.
+function koExtraTimeBadgeHtml(matchObj,liveScore,pathKey){
+  const et=matchObj.extraTime;
+  if(!et||(!et.played&&!et.skipped))return'';
+  const shootoutStarted=!!(matchObj.shootout&&matchObj.shootout.played);
+  const revertLink=shootoutStarted?'':` · <a href="javascript:void(0)" onclick="resetKOExtraTimeChoice('${pathKey}')" style="color:inherit;text-decoration:underline">↺ change</a>`;
+  if(et.skipped)return`<div style="text-align:center;font-size:11px;color:var(--text-faint);margin:4px 0">🥅 Went straight to penalties${revertLink}</div>`;
+  if(liveScore[0]!==liveScore[1])return`<div style="text-align:center;font-size:12px;font-weight:700;color:#1AA6B7;margin:4px 0">⏱ Decided in extra time</div>`;
+  return`<div style="text-align:center;font-size:11px;color:var(--text-faint);margin:4px 0">⏱ In extra time -- add any further goals below as normal${revertLink}</div>`;
+}
 function koShootoutHtml(pathKey,matchObj,teamIds,liveScore){
   if(!matchObj.played||liveScore[0]!==liveScore[1])return'';
+  const et=matchObj.extraTime||{played:false,skipped:false};
+  if(!et.played&&!et.skipped)return''; // ask extra-time-or-penalties first -- see koExtraTimeHtml()
   const so=matchObj.shootout||{a:0,b:0,played:false};
   const na=state.teamNames[teamIds[0]],nb=state.teamNames[teamIds[1]];
   const winnerName=(so.played&&so.a!==so.b)?(so.a>so.b?na:nb):null;
   return`<div class="edit-section" style="margin:10px 0;padding:10px">
     <div class="edit-title" style="margin-top:0">🥅 Penalty Shootout</div>
-    <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Match finished level -- enter the shootout score to decide who advances (the ${liveScore[0]}–${liveScore[1]} result itself doesn't change).</p>
+    <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">${et.played?'Still level after extra time':'Match finished level'} -- enter the shootout score to decide who advances (the ${liveScore[0]}–${liveScore[1]} result itself doesn't change).</p>
     <div class="match-row">
       <span class="team-name-s">${esc(na)}</span>
       <input type="number" min="0" max="20" value="${so.a||0}" onchange="updateKOShootout('${pathKey}','a',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:15px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric">
@@ -6083,6 +6198,8 @@ function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
       <span class="score-display" id="ko-score-${safeId}-b">${liveScore[1]}</span>
       <span class="team-name-s right">${esc(nb)}</span>
     </div>
+    ${koExtraTimeBadgeHtml(matchObj,liveScore,pathKey)}
+    ${koExtraTimeHtml(pathKey,matchObj,liveScore)}
     ${koShootoutHtml(pathKey,matchObj,teamIds,liveScore)}
     ${koTimerHtml(pathKey,matchObj,teamIds,compact)}
     ${matchFeedHtml(pathKey,matchObj)}
@@ -8043,10 +8160,12 @@ async function showHostPastTournaments(){
       el.innerHTML='<div class="recap-title">\ud83d\udcda Past tournaments</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>';
       return;
     }
+    // Newest first, same ordering the list is already stored in -- archived (saved) tournaments
+    // and still-live share sessions can be interleaved here, so tag each row to tell them apart.
     const rows=list.map(t=>`
       <div class="ledger-row">
-        <span class="ledger-name">${esc(t.label||'Tournament')} <span style="color:var(--text-faint);font-size:11px">\u00b7 ${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' \u00b7 \ud83d\udd12':''}</span></span>
-        <button class="pc-btn pc-btn-share" style="flex:none;padding:6px 10px" onclick="viewHostPastTournament('${t.code}','${t.visibility}')">View</button>
+        <span class="ledger-name">${esc(t.label||'Tournament')} <span style="color:var(--text-faint);font-size:11px">${t.archived?'\ud83d\udcbe saved':'\ud83d\udd34 live'} \u00b7 ${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' \u00b7 \ud83d\udd12':''}</span></span>
+        <button class="pc-btn pc-btn-share" style="flex:none;padding:6px 10px" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">View</button>
       </div>`).join('');
     el.innerHTML=`<div class="recap-title">\ud83d\udcda Past tournaments</div><div style="margin-bottom:14px">${rows}</div><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
   }catch(e){
@@ -8054,11 +8173,25 @@ async function showHostPastTournaments(){
     el.innerHTML='<div class="recap-title">\ud83d\udcda Past tournaments</div><p style="font-size:12px;color:#e05252;text-align:center">Could not load -- try again.</p>';
   }
 }
-async function viewHostPastTournament(code,visibility){
+// historyId is only present for an "archived" (saved) entry -- once the follower has view
+// access to that entry's shared code, jump straight to that specific saved tournament in the
+// Archive tab (expanded) instead of just dropping them on whatever's currently live under that
+// code, which might be a totally different, still-in-progress tournament by now.
+async function viewHostPastTournament(code,visibility,historyId){
   closeRecapModal();
-  if(getActiveSharedCode()===code){loadSharedTournament(code);return;}
-  if(visibility==='private')await requestFollowApproval(code);
-  else await followSharedTournament(code);
+  if(getActiveSharedCode()!==code){
+    if(visibility==='private')await requestFollowApproval(code);
+    else await followSharedTournament(code);
+  }else{
+    loadSharedTournament(code);
+  }
+  if(historyId){
+    archiveExpandedId=historyId;
+    setTimeout(()=>{
+      const tab=document.querySelector('.tab[onclick*="\'archive\'"]');
+      showTab('archive',tab);
+    },400);
+  }
 }
 async function showMyHostCode(){
   if(!currentUser){alert('Sign in first.');return;}
@@ -8224,14 +8357,6 @@ function renderSettings(){
     .map(n=>`<option value="${n}" ${n===state.legs?'selected':''}>${legsLabel(n)} round robin (each team plays ${n===1?'once':n+'x'})</option>`).join('');
   updateFormatInfo();
 
-  document.getElementById('team-name-inputs').innerHTML=state.teamNames.map((n,i)=>`
-    <div class="edit-row">
-      <label class="edit-label">Team ${i+1}</label>
-      <select id="tcrest-${i}" style="width:56px;flex:none;text-align:center;font-size:16px">
-        ${TEAM_CRESTS.map(cr=>`<option value="${cr}" ${cr===(state.teamCrests&&state.teamCrests[i]||'')?'selected':''}>${cr||'—'}</option>`).join('')}
-      </select>
-      <input type="text" id="tname-${i}" value="${esc(n)}" placeholder="Team ${i+1}" maxlength="20">
-    </div>`).join('');
   const defMinSel=document.getElementById('cfg-default-minutes');
   if(defMinSel){
     const defMin=state.defaultMatchMinutes||90;
