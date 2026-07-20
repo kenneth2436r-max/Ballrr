@@ -56,3 +56,29 @@ test('matchTopPerformer picks the higher-rated player across both squads (goals 
   `);
   assert.strictEqual(r.top.name, 'Alex', 'Alex scored twice and should outrate Sam, who did nothing notable');
 });
+
+// Streaks: a rough "still going" signal, counting back from the most recent tournament how many
+// in a row were each within 10 days of the previous one.
+test('computeTournamentStreak counts consecutive close-together tournaments and stops at the first big gap', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.threeInARow = computeTournamentStreak(['2026-07-01','2026-07-08','2026-07-15']);
+    window.__results.brokenByGap = computeTournamentStreak(['2026-01-01','2026-07-08','2026-07-15']);
+    window.__results.single = computeTournamentStreak(['2026-07-01']);
+    window.__results.empty = computeTournamentStreak([]);
+  `);
+  assert.strictEqual(r.threeInARow, 3, 'three tournaments a week apart should all count');
+  assert.strictEqual(r.brokenByGap, 2, 'a 6-month-old outlier should not extend the current streak');
+  assert.strictEqual(r.single, 1, 'a single tournament is still a streak of 1');
+  assert.strictEqual(r.empty, 0, 'no tournaments at all is a streak of 0');
+});
+
+test('streakBadgeHtml only shows for a streak of 2 or more', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.none = streakBadgeHtml(1);
+    window.__results.some = streakBadgeHtml(3);
+  `);
+  assert.strictEqual(r.none, '', 'a lone tournament should not be advertised as a "streak"');
+  assert.ok(r.some.includes('3-tournament streak'));
+});
