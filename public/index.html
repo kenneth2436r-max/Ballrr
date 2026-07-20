@@ -4748,15 +4748,29 @@ function renamePlayerEverywhere(oldName,newName){
   renderAll();
   return count;
 }
+// Renaming matches purely by name string -- there's no separate unique ID behind a player
+// anywhere in the data model. That's fine for fixing a genuine typo (one continuous person, just
+// spelled wrong somewhere), but if two DIFFERENT real people happen to share this exact name,
+// renamePlayerEverywhere() can't tell their stats apart either -- it will retag every archived
+// tournament's matching entries, including ones that actually belonged to the other person,
+// silently moving their history onto the new name too. There's no way to detect that risk from
+// the data itself (a past playerStats row never recorded anything beyond the name), so this
+// warns explicitly and requires the person doing the rename to confirm it's safe before the
+// (irreversible, for past tournaments) rename happens.
 function renamePlayerFromCard(oldName){
-  showThemedPrompt('Fix the spelling for "'+oldName+'" -- this updates it everywhere: this tournament, the player database, and every archived tournament in Career/Archive.',oldName,(newName)=>{
-    const trimmed=newName.trim();
-    if(!trimmed||trimmed===oldName)return;
-    renamePlayerEverywhere(oldName,trimmed);
-    closePlayerCard();
-    haptic('save');
-    alert('Renamed "'+oldName+'" to "'+trimmed+'" everywhere.');
-  });
+  showThemedConfirm(
+    'Renaming "'+oldName+'" updates every match with that exact name -- this tournament, the player database, and every archived tournament in Career/Archive.\n\nIf two different people have ever shared this exact name, this will also move the OTHER person\'s past stats onto the new name, since nothing besides the name tells them apart. Only continue if "'+oldName+'" has only ever referred to one person.',
+    ()=>{
+      showThemedPrompt('Fix the spelling for "'+oldName+'":',oldName,(newName)=>{
+        const trimmed=newName.trim();
+        if(!trimmed||trimmed===oldName)return;
+        renamePlayerEverywhere(oldName,trimmed);
+        closePlayerCard();
+        haptic('save');
+        alert('Renamed "'+oldName+'" to "'+trimmed+'" everywhere.');
+      });
+    }
+  );
 }
 function computePlayerForm(name){
   // Trend indicator from this tournament's rated matches only (not archive) -- shows whether
