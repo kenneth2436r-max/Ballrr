@@ -8759,50 +8759,84 @@ async function showHostPastTournaments(){
   if(!followedHost){alert('Follow a host first.');return;}
   const hostName=followedHost.hostName||'Their';
   const el=document.getElementById('recap-card-content');
-  el.innerHTML=`<div class="recap-title">\ud83d\udc64 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center">Loading\u2026</p>`;
+  el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center">Loading…</p>`;
   document.getElementById('recap-modal').style.display='flex';
   try{
     const snap=await hostProfileDocRef(followedHost.hostUid).get();
     const list=(snap.exists&&Array.isArray(snap.data().pastTournaments))?snap.data().pastTournaments:[];
     lastPastTournamentsList=list;
     if(!list.length){
-      el.innerHTML=`<div class="recap-title">\ud83d\udc64 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+      el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
       return;
     }
-    const medals=['\ud83e\udd47','\ud83e\udd48','\ud83e\udd49'];
-    const leaderboard=computeHostCareerLeaderboard(list).slice(0,10);
+    const followerCount=(snap.exists&&Array.isArray(snap.data().followers))?snap.data().followers.length:0;
+    const medals=['🥇','🥈','🥉'];
+    const fullLeaderboard=computeHostCareerLeaderboard(list);
+    const leaderboard=fullLeaderboard.slice(0,10);
     // Tapping a name opens the same FIFA-style player card the host sees, just built from their
     // published stats (showHostPlayerCard()) -- not a plain text list anymore.
     const careerHtml=leaderboard.length?leaderboard.map((p,i)=>{
       const safe=esc(p.name).replace(/'/g,"\\'");
       return`
       <div class="scorer-item" style="cursor:pointer" onclick="showHostPlayerCard('${safe}')">
-        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'\u2014')} \u00b7 ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
-        <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}\u26bd ${p.assists}\ud83c\udd70${p.cleanSheets?' '+p.cleanSheets+'\ud83e\udde4':''}</span>
+        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
+        <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}⚽ ${p.assists}🅰${p.cleanSheets?' '+p.cleanSheets+'🧤':''}</span>
       </div>`;}).join(''):'<div class="empty-msg">No public tournament stats yet</div>';
     const archetypes=computeHostCareerArchetypes(list);
     const archetypesHtml=archetypes.length?`<div class="section-header">Player Archetypes</div>
       <div class="badge-strip">${archetypes.map(a=>`
-        <div class="badge-chip"><span class="badge-icon">${a.icon}</span><div><div class="badge-label">${esc(a.label)}</div><div class="badge-detail">${esc(a.name)} \u00b7 ${esc(a.detail)}</div></div></div>`).join('')}</div>`:'';
+        <div class="badge-chip"><span class="badge-icon">${a.icon}</span><div><div class="badge-label">${esc(a.label)}</div><div class="badge-detail">${esc(a.name)} · ${esc(a.detail)}</div></div></div>`).join('')}</div>`:'';
+    const trophyList=computeHostTrophyCabinet(list);
+    const trophyCount=trophyList.reduce((s,t)=>s+t.total,0);
     // Newest first, same ordering the list is already stored in -- archived (saved) tournaments
-    // and still-live share sessions can be interleaved here, so tag each row to tell them apart.
-    const rows=list.map(t=>`
-      <div class="ledger-row">
-        <span class="ledger-name">${esc(t.label||'Tournament')} <span style="color:var(--text-faint);font-size:11px">${t.archived?'\ud83d\udcbe saved':'\ud83d\udd34 live'} \u00b7 ${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' \u00b7 \ud83d\udd12':''}</span></span>
-        <button class="pc-btn pc-btn-share" style="flex:none;padding:6px 10px" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">View</button>
+    // and still-live share sessions can be interleaved here, so tag each tile to tell them apart.
+    // Instagram-style: a tappable "post grid" instead of a plain list -- same viewHostPastTournament()
+    // click target as before, just tiled instead of stacked.
+    const gridHtml=list.map(t=>`
+      <div class="profile-tile" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">
+        <span class="profile-tile-icon">${t.archived?'🏆':'🔴'}</span>
+        <div class="profile-tile-label">${esc(t.label||'Tournament')}</div>
+        <div class="profile-tile-date">${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' 🔒':''}</div>
       </div>`).join('');
-    el.innerHTML=`<div class="recap-title">\ud83d\udc64 ${esc(hostName)}'s profile</div>
+    el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats -- kept separate from your own.</p>
-      <div class="section-header">Career \u2014 All-Time Leaderboard</div>
-      ${archetypesHtml}
-      <div style="margin-bottom:14px">${careerHtml}</div>
-      <div class="section-header">Archive \u2014 Saved Tournaments</div>
-      <div style="margin-bottom:14px">${rows}</div>
-      <div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+      <div class="profile-stats-bar">
+        <div class="profile-stat"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
+        <div class="profile-stat"><div class="profile-stat-num">${fullLeaderboard.length}</div><div class="profile-stat-label">Players</div></div>
+        <div class="profile-stat"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
+        <div class="profile-stat"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
+      </div>
+      <div class="profile-pills">
+        <button class="profile-pill active" id="host-profile-pill-grid" onclick="switchHostProfilePill('grid')">🗂 Archive</button>
+        <button class="profile-pill" id="host-profile-pill-career" onclick="switchHostProfilePill('career')">🏆 Career</button>
+      </div>
+      <div id="host-profile-grid-view">
+        <div class="section-header">Archive — Saved Tournaments</div>
+        <div class="profile-grid">${gridHtml}</div>
+      </div>
+      <div id="host-profile-career-view" style="display:none">
+        <div class="section-header">Career — All-Time Leaderboard</div>
+        ${archetypesHtml}
+        <div style="margin-top:10px">${careerHtml}</div>
+      </div>
+      <div class="recap-actions" style="margin-top:14px"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
   }catch(e){
     console.error('Could not load past tournaments:',e);
-    el.innerHTML=`<div class="recap-title">\ud83d\udc64 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:#e05252;text-align:center">Could not load -- try again.</p>`;
+    el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:#e05252;text-align:center">Could not load -- try again.</p>`;
   }
+}
+function switchHostProfilePill(which){
+  const gridBtn=document.getElementById('host-profile-pill-grid'),careerBtn=document.getElementById('host-profile-pill-career');
+  const gridView=document.getElementById('host-profile-grid-view'),careerView=document.getElementById('host-profile-career-view');
+  if(!gridBtn||!careerBtn||!gridView||!careerView)return;
+  if(which==='career'){
+    gridBtn.classList.remove('active');careerBtn.classList.add('active');
+    gridView.style.display='none';careerView.style.display='';
+  }else{
+    careerBtn.classList.remove('active');gridBtn.classList.add('active');
+    careerView.style.display='none';gridView.style.display='';
+  }
+  haptic('tap');
 }
 // historyId is only present for an "archived" (saved) entry -- those render straight from their
 // embedded snapshot (viewArchivedTournamentSnapshot()), completely independent of whether the
