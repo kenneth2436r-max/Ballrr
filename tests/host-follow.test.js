@@ -260,19 +260,23 @@ test('startMyFollowersListener keeps the Profile tab\'s Followers stat live, and
     followers: ['f1', 'f2'], followerNames: { f1: 'Amy', f2: 'Zed' },
   };
   const { window } = freshWindow({ dbStore, extraHtml: '<div id="profile-stats-bar"></div><div id="player-card-modal" style="display:none"><div id="player-card-content"></div></div>' });
+  // startMyFollowersListener() and showProfileFollowers() must run inside the SAME eval() call --
+  // showProfileFollowers() reads the top-level `myFollowersList` the listener just updated, and
+  // separate window.eval() calls don't share top-level `let` bindings (see harness.js's note).
+  // The mock onSnapshot() fires its first callback synchronously, so no tick-wait is needed
+  // between the two calls.
   runInOneEval(window, `
     currentUser = { uid:'hostUid', displayName:'Aaryan' };
     state = { tournamentHistory: [], careerSnapshotSaved: true };
     startMyFollowersListener();
+    showProfileFollowers();
   `);
-  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
 
   const statsHtml = window.document.getElementById('profile-stats-bar').innerHTML;
   assert.ok(statsHtml.includes('Followers'), 'a Followers stat should be shown alongside Tournaments/Players/Trophies');
   assert.ok(statsHtml.includes('showProfileFollowers()'), 'the Followers stat should be tappable');
   assert.ok(statsHtml.includes('showProfileTrophies()'), 'the Trophies stat should be tappable');
 
-  runInOneEval(window, `showProfileFollowers();`);
   const listHtml = window.document.getElementById('player-card-content').innerHTML;
   assert.ok(listHtml.includes('Amy') && listHtml.includes('Zed'), 'the follower list should name each follower');
   assert.strictEqual(window.document.getElementById('player-card-modal').style.display, 'flex');
@@ -292,19 +296,25 @@ test('previewHostProfile makes the host\'s Trophies and Followers stats tappable
     ],
   };
   const { window } = freshWindow({ dbStore, extraHtml: '<div id="player-card-modal" style="display:none"><div id="player-card-content"></div></div>' });
+  // previewHostProfile()/showHostFollowersList()/showHostTrophies() must all run inside the SAME
+  // eval() call -- the latter two read lastHostFollowerNames/lastPastTournamentsList, which
+  // previewHostProfile() sets as top-level `let` bindings only visible within that same eval
+  // (see harness.js's note on why separate eval() calls don't share them). Captured into window
+  // properties between calls since each call overwrites #player-card-content's innerHTML.
   runInOneEval(window, `
     currentUser = { uid:'followerUid', displayName:'Fan' };
     state = {};
-    window.__previewDone = previewHostProfile('ABCDEF');
+    window.__testDone = (async () => {
+      await previewHostProfile('ABCDEF');
+      showHostFollowersList();
+      window.__followersHtml = document.getElementById('player-card-content').innerHTML;
+      showHostTrophies();
+      window.__trophiesHtml = document.getElementById('player-card-content').innerHTML;
+    })();
   `);
-  await window.__previewDone;
+  await window.__testDone;
   for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
 
-  runInOneEval(window, `showHostFollowersList();`);
-  let listHtml = window.document.getElementById('player-card-content').innerHTML;
-  assert.ok(listHtml.includes('Amy'), 'the host\'s follower list should be shown to a visitor');
-
-  runInOneEval(window, `showHostTrophies();`);
-  const trophyHtml = window.document.getElementById('player-card-content').innerHTML;
-  assert.ok(trophyHtml.includes('Vaibhav'), 'the host\'s trophy cabinet should be shown to a visitor');
+  assert.ok(window.__followersHtml.includes('Amy'), 'the host\'s follower list should be shown to a visitor');
+  assert.ok(window.__trophiesHtml.includes('Vaibhav'), 'the host\'s trophy cabinet should be shown to a visitor');
 });
