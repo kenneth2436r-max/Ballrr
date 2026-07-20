@@ -83,7 +83,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
    pill switcher down to the existing Career leaderboard content. Purely additive: the classic
    Archive and Career tabs (still reachable from the sidebar) are untouched. */
 .profile-stats-bar{display:flex;justify-content:space-around;padding:14px 8px;margin-bottom:14px;background:var(--card-bg);border:1px solid var(--border);border-radius:12px}
-.profile-stat{text-align:center}
+.profile-stat{text-align:center;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .profile-stat-num{font-size:20px;font-weight:800;color:var(--btn-bg)}
 .profile-stat-label{font-size:11px;color:var(--text-muted);margin-top:2px}
 .profile-pills{display:flex;gap:8px;margin-bottom:14px}
@@ -1237,6 +1237,8 @@ let followedHost=null; // {hostUid, hostCode, hostName, lastSeenStartedAt} | nul
 let hostFollowUnsub=null;
 let hostFollowNotice=null; // {code, visibility, hostName} once a followed host has gone live, until acted on
 let myHostCode=null; // this device's own signed-in user's host code, cached after first fetch/create
+let myFollowersList=[]; // [{uid,name}] -- this device's own followers, kept live via startMyFollowersListener()
+let myFollowersUnsub=null;
 function getFollowedHost(){
   try{
     const raw=localStorage.getItem(HOST_FOLLOW_KEY);
@@ -1293,7 +1295,25 @@ function startApp(){
   ensureShape();
   renderAll();
   renderAppModeUI();
-  if(currentUser)startHostFollowListener();
+  if(currentUser){startHostFollowListener();startMyFollowersListener();}
+}
+
+// Keeps this signed-in user's OWN follower list live for the Profile tab's stats bar (the
+// Followers count + tappable list) -- separate from startHostFollowListener() above, which
+// watches a host THIS device follows, not this device's own followers. hostProfiles/{uid} may
+// not exist yet for someone who has never shared a tournament, which is fine: onSnapshot still
+// fires once with exists:false and myFollowersList just stays empty.
+function startMyFollowersListener(){
+  if(myFollowersUnsub){myFollowersUnsub();myFollowersUnsub=null;}
+  if(!currentUser)return;
+  myFollowersUnsub=hostProfileDocRef(currentUser.uid).onSnapshot(snap=>{
+    if(!snap.exists){myFollowersList=[];renderProfileStats();return;}
+    const d=snap.data();
+    const followers=d.followers||[];
+    const names=d.followerNames||{};
+    myFollowersList=followers.map(uid=>({uid,name:names[uid]||'Someone'}));
+    renderProfileStats();
+  },e=>console.error('My-followers listener failed:',e));
 }
 
 function isNativeApp(){
@@ -5790,6 +5810,7 @@ async function previewHostProfile(rawCode){
     const existingFollow=getFollowedHost();
     const alreadyFollowing=!!(existingFollow&&existingFollow.hostCode===code);
     const followerCount=Array.isArray(d.followers)?d.followers.length:0;
+    lastHostFollowerNames=Array.isArray(d.followers)?d.followers.map(uid=>(d.followerNames&&d.followerNames[uid])||'Someone'):[];
     const fullLeaderboard=computeHostCareerLeaderboard(list);
     const trophyCount=computeHostTrophyCabinet(list).reduce((s,t)=>s+t.total,0);
     const archetypes=computeHostCareerArchetypes(list);
@@ -5817,10 +5838,10 @@ async function previewHostProfile(rawCode){
     el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats.</p>
       <div class="profile-stats-bar">
-        <div class="profile-stat"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${fullLeaderboard.length}</div><div class="profile-stat-label">Players</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
+        <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
+        <div class="profile-stat" onclick="switchHostProfilePill('career')"><div class="profile-stat-num">${fullLeaderboard.length}</div><div class="profile-stat-label">Players</div></div>
+        <div class="profile-stat" onclick="showHostTrophies()"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
+        <div class="profile-stat" onclick="showHostFollowersList()"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
       </div>
       ${followBtn}
       <div class="profile-pills" style="margin-top:14px">
@@ -7830,11 +7851,44 @@ function renderProfileStats(){
   const tCount=(state.tournamentHistory||[]).length;
   const pCount=computeCareerLeaderboard().length;
   const trophyCount=computeTrophyCabinet().reduce((s,t)=>s+t.total,0);
+  const followerCount=myFollowersList.length;
   el.innerHTML=`
-    <div class="profile-stat"><div class="profile-stat-num">${tCount}</div><div class="profile-stat-label">Tournaments</div></div>
-    <div class="profile-stat"><div class="profile-stat-num">${pCount}</div><div class="profile-stat-label">Players</div></div>
-    <div class="profile-stat"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
+    <div class="profile-stat" onclick="switchProfilePill('grid')"><div class="profile-stat-num">${tCount}</div><div class="profile-stat-label">Tournaments</div></div>
+    <div class="profile-stat" onclick="switchProfilePill('career')"><div class="profile-stat-num">${pCount}</div><div class="profile-stat-label">Players</div></div>
+    <div class="profile-stat" onclick="showProfileTrophies()"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
+    <div class="profile-stat" onclick="showProfileFollowers()"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
   `;
+}
+// Shared list-style renderers for the two tappable stats that don't already have a home
+// elsewhere (Tournaments -> Grid pill, Players -> Career pill cover themselves) -- reused by
+// both this device's own Profile tab and the follower-facing profile preview below, since both
+// show the exact same kind of data (just sourced from local state vs. a published snapshot).
+function trophyCabinetListHtml(list,title){
+  if(!list.length)return`<div class="edit-title" style="margin-bottom:10px">${esc(title)}</div><div class="empty-msg">No trophies won yet</div><button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
+  const rows=list.map(t=>{
+    const breakdown=Object.keys(t.wins||{}).map(label=>`${(t.icons&&t.icons[label])||'🏆'} ${label} ×${t.wins[label]}`).join('<br>');
+    return`<div class="scorer-item">
+      <div><strong>${esc(t.name)}</strong> <span style="color:#888;font-size:12px">(${esc(t.team||'—')})</span><div style="font-size:11px;color:var(--text-muted);margin-top:2px">${breakdown}</div></div>
+      <span class="g-badge" style="background:#fde9b8;color:#7a4b00">🏆 ${t.total}</span>
+    </div>`;
+  }).join('');
+  return`<div class="edit-title" style="margin-bottom:10px">${esc(title)}</div>${rows}<button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
+}
+function followersListHtml(names,title){
+  if(!names.length)return`<div class="edit-title" style="margin-bottom:10px">${esc(title)}</div><div class="empty-msg">No followers yet -- share your follow link from Settings</div><button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
+  const rows=names.map(n=>`<div class="scorer-item"><div>👤 <strong>${esc(n)}</strong></div></div>`).join('');
+  return`<div class="edit-title" style="margin-bottom:10px">${esc(title)}</div>${rows}<button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
+}
+// Reuses the existing #player-card-modal (already scrollable and already stacked above the
+// recap modal) instead of adding yet another overlay -- same convention showPlayerCard() and
+// showHostPlayerCard() already follow.
+function showProfileTrophies(){
+  document.getElementById('player-card-content').innerHTML=trophyCabinetListHtml(computeTrophyCabinet(),'🏆 Trophy Cabinet');
+  document.getElementById('player-card-modal').style.display='flex';
+}
+function showProfileFollowers(){
+  document.getElementById('player-card-content').innerHTML=followersListHtml(myFollowersList.map(f=>f.name),'👥 Followers');
+  document.getElementById('player-card-modal').style.display='flex';
 }
 function renderProfileGrid(){
   const el=document.getElementById('profile-grid-container');
@@ -8739,6 +8793,7 @@ async function shareFollowHostLink(){
 // find an archived entry's embedded snapshot (see publishArchivedTournamentToFollowers()) without
 // a second Firestore read -- the list was just fetched to build this exact list of buttons.
 let lastPastTournamentsList=null;
+let lastHostFollowerNames=[]; // names of whatever host's profile is currently open in the recap modal
 // Follower-facing equivalent of computeCareerLeaderboard() -- combines every PUBLIC archived
 // tournament's embedded snapshot (hostProfiles.pastTournaments[].snapshot) into one all-time
 // leaderboard, built entirely from the host's own published data via the same
@@ -8872,6 +8927,7 @@ async function showHostPastTournaments(){
       return;
     }
     const followerCount=(snap.exists&&Array.isArray(snap.data().followers))?snap.data().followers.length:0;
+    lastHostFollowerNames=(snap.exists&&Array.isArray(snap.data().followers))?snap.data().followers.map(uid=>(snap.data().followerNames&&snap.data().followerNames[uid])||'Someone'):[];
     const medals=['🥇','🥈','🥉'];
     const fullLeaderboard=computeHostCareerLeaderboard(list);
     const leaderboard=fullLeaderboard.slice(0,10);
@@ -8903,10 +8959,10 @@ async function showHostPastTournaments(){
     el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats -- kept separate from your own.</p>
       <div class="profile-stats-bar">
-        <div class="profile-stat"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${fullLeaderboard.length}</div><div class="profile-stat-label">Players</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
-        <div class="profile-stat"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
+        <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
+        <div class="profile-stat" onclick="switchHostProfilePill('career')"><div class="profile-stat-num">${fullLeaderboard.length}</div><div class="profile-stat-label">Players</div></div>
+        <div class="profile-stat" onclick="showHostTrophies()"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
+        <div class="profile-stat" onclick="showHostFollowersList()"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
       </div>
       <div class="profile-pills">
         <button class="profile-pill active" id="host-profile-pill-grid" onclick="switchHostProfilePill('grid')">🗂 Archive</button>
@@ -8939,6 +8995,18 @@ function switchHostProfilePill(which){
     careerView.style.display='none';gridView.style.display='';
   }
   haptic('tap');
+}
+// Follower-facing equivalents of showProfileTrophies()/showProfileFollowers() -- same reused
+// #player-card-modal (already stacked above #recap-modal), just sourced from the published
+// snapshot data (lastPastTournamentsList/lastHostFollowerNames) the currently-open profile
+// preview or "past tournaments" view just fetched, instead of this device's own local state.
+function showHostTrophies(){
+  document.getElementById('player-card-content').innerHTML=trophyCabinetListHtml(computeHostTrophyCabinet(lastPastTournamentsList||[]),'🏆 Trophy Cabinet');
+  document.getElementById('player-card-modal').style.display='flex';
+}
+function showHostFollowersList(){
+  document.getElementById('player-card-content').innerHTML=followersListHtml(lastHostFollowerNames||[],'👥 Followers');
+  document.getElementById('player-card-modal').style.display='flex';
 }
 // historyId is only present for an "archived" (saved) entry -- those render straight from their
 // embedded snapshot (viewArchivedTournamentSnapshot()), completely independent of whether the

@@ -247,3 +247,64 @@ test('the organizer can approve a pending follower request, granting view access
   assert.ok((dbStore['shared/PRIVCODE'].followers || []).includes('followerUid'));
   assert.ok(!(dbStore['shared/PRIVCODE'].pendingFollowerRequests || []).includes('followerUid'));
 });
+
+// Regression coverage for: the organizer's own Profile tab never showed a Followers count at
+// all, and none of the stats (Tournaments/Players/Trophies/Followers) could be tapped for more
+// detail. startMyFollowersListener() keeps myFollowersList live from this device's own
+// hostProfiles doc; showProfileFollowers()/showProfileTrophies() are what tapping those two
+// stats opens (Tournaments/Players just switch the existing Grid/Career pills).
+test('startMyFollowersListener keeps the Profile tab\'s Followers stat live, and tapping it lists their names', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan', hostCode: 'ABCDEF',
+    followers: ['f1', 'f2'], followerNames: { f1: 'Amy', f2: 'Zed' },
+  };
+  const { window } = freshWindow({ dbStore, extraHtml: '<div id="profile-stats-bar"></div><div id="player-card-modal" style="display:none"><div id="player-card-content"></div></div>' });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [], careerSnapshotSaved: true };
+    startMyFollowersListener();
+  `);
+  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+
+  const statsHtml = window.document.getElementById('profile-stats-bar').innerHTML;
+  assert.ok(statsHtml.includes('Followers'), 'a Followers stat should be shown alongside Tournaments/Players/Trophies');
+  assert.ok(statsHtml.includes('showProfileFollowers()'), 'the Followers stat should be tappable');
+  assert.ok(statsHtml.includes('showProfileTrophies()'), 'the Trophies stat should be tappable');
+
+  runInOneEval(window, `showProfileFollowers();`);
+  const listHtml = window.document.getElementById('player-card-content').innerHTML;
+  assert.ok(listHtml.includes('Amy') && listHtml.includes('Zed'), 'the follower list should name each follower');
+  assert.strictEqual(window.document.getElementById('player-card-modal').style.display, 'flex');
+});
+
+// Same idea, follower-facing side: previewing a host's profile should let a visitor tap
+// Trophies/Followers too, sourced from the published snapshot data instead of local state.
+test('previewHostProfile makes the host\'s Trophies and Followers stats tappable for a visitor', async () => {
+  const dbStore = {};
+  dbStore['hostCodes/ABCDEF'] = { uid: 'hostUid' };
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan', hostCode: 'ABCDEF',
+    followers: ['f1'], followerNames: { f1: 'Amy' },
+    pastTournaments: [
+      { code: 'CODE1', historyId: 'h1', label: 'Summer Cup', startedAt: 1000, visibility: 'public', archived: true,
+        snapshot: { table: [], playerStats: [{ name: 'Vaibhav', team: 'FC Sherin', avg: 9, count: 3, goals: 5, assists: 3, cleanSheets: 0 }] } },
+    ],
+  };
+  const { window } = freshWindow({ dbStore, extraHtml: '<div id="player-card-modal" style="display:none"><div id="player-card-content"></div></div>' });
+  runInOneEval(window, `
+    currentUser = { uid:'followerUid', displayName:'Fan' };
+    state = {};
+    window.__previewDone = previewHostProfile('ABCDEF');
+  `);
+  await window.__previewDone;
+  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+
+  runInOneEval(window, `showHostFollowersList();`);
+  let listHtml = window.document.getElementById('player-card-content').innerHTML;
+  assert.ok(listHtml.includes('Amy'), 'the host\'s follower list should be shown to a visitor');
+
+  runInOneEval(window, `showHostTrophies();`);
+  const trophyHtml = window.document.getElementById('player-card-content').innerHTML;
+  assert.ok(trophyHtml.includes('Vaibhav'), 'the host\'s trophy cabinet should be shown to a visitor');
+});
