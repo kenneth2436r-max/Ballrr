@@ -437,6 +437,12 @@ select option{background:var(--input-bg);color:var(--text)}
 .result-teams{display:flex;justify-content:space-between;align-items:center}
 .result-score{font-weight:700;font-size:16px;background:var(--input-bg);padding:3px 10px;border-radius:6px}
 .result-scorers{font-size:11px;color:var(--text-muted);margin-top:5px}
+/* Reels feed -- a richer, bigger version of .result-card for the Instagram-style consumption
+   view (Man of the Match line, more padding/breathing room). The classic History tab keeps
+   using the plain .result-card above, untouched. */
+.reel-card{background:var(--card-bg);border:1px solid var(--border);border-radius:14px;padding:18px 16px;margin-bottom:14px;box-shadow:0 2px 10px rgba(0,0,0,0.06)}
+.reel-card-label{font-size:10px;color:var(--text-faint);text-transform:uppercase;letter-spacing:0.4px;margin-bottom:8px}
+.reel-card-motm{font-size:12px;color:var(--text-muted);margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .section-header{font-size:11px;font-weight:600;color:var(--text-muted);margin:14px 0 8px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);padding-bottom:6px}
 
 /* Team name edit / settings */
@@ -692,6 +698,12 @@ select option{background:var(--input-bg);color:var(--text)}
   <div id="scorer-list"></div>
 </div>
 
+<!-- REELS (Instagram-style consumption feed of played matches -- classic Matches/Scorers/
+     History tabs above and below stay fully intact for actual score entry and logging) -->
+<div id="tab-reels" class="section">
+  <div id="reels-container"></div>
+</div>
+
 <!-- LINEUP -->
 <div id="tab-lineups" class="section">
   <div id="lineups-container"></div>
@@ -912,7 +924,7 @@ select option{background:var(--input-bg);color:var(--text)}
     <button class="tab bottom-nav-btn active" onclick="showTab('home',this)"><span class="bottom-nav-icon">🏠</span>Home</button>
     <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('draft',this)"><span class="bottom-nav-icon">🎡</span>Draft</button>
     <button class="bottom-nav-btn create" onclick="openCreateMenu()"><span class="bottom-nav-icon">➕</span>Create</button>
-    <button class="tab bottom-nav-btn" onclick="showTab('matches',this)"><span class="bottom-nav-icon">⚽</span>Matches</button>
+    <button class="tab bottom-nav-btn" onclick="showTab('reels',this)"><span class="bottom-nav-icon">🎬</span>Reels</button>
     <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('profile',this)"><span class="bottom-nav-icon">👤</span>Profile</button>
   </div>
 </nav>
@@ -7575,6 +7587,115 @@ function koResultCard(label,teamIds,r){
   </div>`;
 }
 
+// Instagram-Reels-style consumption feed: one big card per completed match (score + scorers +
+// a computed Man of the Match), most-recently-played first. Deliberately built as a NEW,
+// separate render path rather than reusing/refactoring renderResults() -- the traversal logic
+// for league/page3/koRounds/customKO results is intricate and already thoroughly tested via the
+// classic History tab, so this duplicates the same match-collection walk (matching the
+// established pattern elsewhere in this file of adding a parallel function instead of risking a
+// shared refactor) and just changes what's collected into and how it's rendered.
+function matchTopPerformer(m,teamIds){
+  if(!m||!m.g)return null;
+  const[ta,tb]=teamIds;
+  let best=null;
+  [[ta,m.g[1],m.g[0]],[tb,m.g[0],m.g[1]]].forEach(([teamId,oppGoals,ownGoals])=>{
+    if(teamId==null)return;
+    const squad=getMatchSquad(m,teamId);
+    const cleanSheet=oppGoals===0;
+    const result=ownGoals>oppGoals?'win':ownGoals<oppGoals?'loss':'draw';
+    squad.forEach(name=>{
+      const pos=effectivePlayerPosition(m,name);
+      const goals=(m.scorers||[]).filter(s=>s.team===teamId&&s.name.trim()===name).reduce((s,x)=>s+(x.goals||1),0);
+      const assists=(m.assists||[]).filter(s=>s.team===teamId&&s.name.trim()===name).reduce((s,x)=>s+(x.count||1),0);
+      const contrib=m.contributions&&m.contributions[name];
+      const override=m.ratingOverrides&&m.ratingOverrides[name];
+      const rating=(override!=null)?override:computePlayerMatchRating(pos,goals,assists,cleanSheet,oppGoals,result,contrib);
+      if(rating!=null&&(!best||rating>best.rating))best={name,rating,teamId};
+    });
+  });
+  return best;
+}
+function reelCardHtml(label,teamIds,m){
+  const na=state.teamNames[teamIds[0]],nb=state.teamNames[teamIds[1]];
+  const scorers=(m.scorers||[]).filter(s=>s.name.trim()).map(s=>`${esc(s.name)}${(s.goals||1)>1?' <strong>('+s.goals+')</strong>':''} <span style="color:#bbb">(${esc(state.teamNames[s.team])})</span>`).join(' &nbsp;·&nbsp; ');
+  const top=matchTopPerformer(m,teamIds);
+  const safeTop=top?esc(top.name).replace(/'/g,"\\'"):'';
+  return`<div class="reel-card">
+    ${label?`<div class="reel-card-label">${label}</div>`:''}
+    <div class="result-teams">
+      <span style="font-size:15px;font-weight:700">${esc(na)}</span>
+      <span class="result-score" style="font-size:22px">${m.g[0]} – ${m.g[1]}</span>
+      <span style="font-size:15px;font-weight:700">${esc(nb)}</span>
+    </div>
+    ${scorers?`<div class="result-scorers">⚽ ${scorers}</div>`:''}
+    ${top?`<div class="reel-card-motm">⭐ Man of the Match: <strong class="player-name-link" onclick="showPlayerCard('${safeTop}')">${esc(top.name)}</strong> <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${top.rating.toFixed(1)}</span></div>`:''}
+  </div>`;
+}
+function renderReelsFeed(){
+  const c=document.getElementById('reels-container');
+  if(!c)return;
+  const any=state.results.some(r=>r.played);
+  const koAny=allKOMatchObjs().some(r=>r&&r.played)||(state.koThird&&state.koThird.played);
+  if(!any&&!koAny){c.innerHTML='<div class="empty-msg">No matches played yet -- results will show up here as a scrollable feed once you log some.</div>';return;}
+  const cards=[];
+  if(any){
+    state.results.forEach((r,mi)=>{
+      if(!r.played)return;
+      const[a,b]=state.fixtures[mi];
+      cards.push(reelCardHtml(null,[a,b],r));
+    });
+  }
+  if(koAny){
+    if(state.customKO&&state.customKO.enabled){
+      state.customKO.stages.forEach((stage,si)=>{
+        stage.matches.forEach((mt,mi)=>{
+          const m=state.customResults[si]&&state.customResults[si][mi];
+          if(!m||!m.played)return;
+          const res=resolveCustomMatch(si,mi);
+          if(res.teamA==null||res.teamB==null)return;
+          cards.push(reelCardHtml(esc(stage.name||'Stage '+(si+1))+' · Match '+(mi+1),[res.teamA,res.teamB],m));
+        });
+      });
+    }else if(state.numTeams===3&&state.page3){
+      const labels={qualifier:'Qualifier',eliminator:'Eliminator',final:'Grand Final'};
+      const t=calcTable();
+      const first=t[0].id,second=t[1].id,third=t[2].id;
+      const q=state.page3.qualifier;
+      if(q.played)cards.push(reelCardHtml(labels.qualifier,[first,third],q));
+      if(q.played&&q.g[0]!==q.g[1]){
+        const qWinner=q.g[0]>q.g[1]?first:third,qLoser=q.g[0]>q.g[1]?third:first;
+        const e=state.page3.eliminator;
+        if(e.played)cards.push(reelCardHtml(labels.eliminator,[second,qLoser],e));
+        if(e.played&&e.g[0]!==e.g[1]){
+          const eWinner=e.g[0]>e.g[1]?second:qLoser;
+          const f=state.page3.final;
+          if(f.played)cards.push(reelCardHtml(labels.final,[qWinner,eWinner],f));
+        }
+      }
+    }else if(state.koRounds){
+      const totalRounds=bracketRounds();
+      for(let r=0;r<totalRounds;r++){
+        for(let s=0;s<state.koRounds[r].length;s++){
+          const m=state.koRounds[r][s];
+          if(!m.played)continue;
+          const slot=getRoundSlot(r,s);
+          if(slot.teamA==null||slot.teamB==null)continue;
+          cards.push(reelCardHtml(roundLabel(r,totalRounds)+' · Match '+(s+1),[slot.teamA,slot.teamB],m));
+        }
+      }
+      if(state.koThird&&state.koThird.played){
+        const semiRound=totalRounds-2;
+        const a=getRoundSlot(semiRound,0),b=getRoundSlot(semiRound,1);
+        if(a.loser!=null&&b.loser!=null)cards.push(reelCardHtml('3rd Place Match',[a.loser,b.loser],state.koThird));
+      }
+    }
+  }
+  // Newest-feeling first -- there's no per-match played timestamp to sort by, but knockout
+  // rounds are pushed after league games and later rounds after earlier ones, so a straight
+  // reverse puts the most recently-reached stage of the tournament at the top of the feed.
+  c.innerHTML=cards.reverse().join('');
+}
+
 /* ---------- SETTINGS ---------- */
 let archiveExpandedId=null;
 function toggleArchiveEntry(id){
@@ -9639,7 +9760,7 @@ function renderAll(){
   updatePendingApprovalUI();
   if(isPendingApproval())return; // nothing else to render -- the waiting screen covers everything
   document.body.classList.toggle('viewer-mode',isViewerMode());
-  const steps=[renderSub,renderHome,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderArchive,renderCareer,renderProfile,renderSettings];
+  const steps=[renderSub,renderHome,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderReelsFeed,renderArchive,renderCareer,renderProfile,renderSettings];
   steps.forEach(fn=>{
     try{fn();}catch(e){console.error('Render step failed:',fn.name,e);}
   });
@@ -9676,7 +9797,7 @@ function updatePendingApprovalUI(){
 // 'knockout' is kept as an alias for 'matches' -- the Knockout tab was merged into Matches, but
 // a few other places (cue cards, the Home screen's shortcut cards) may still reference the old
 // tab name by habit, and this keeps the tab pill label sensible if so instead of showing "knockout".
-const TAB_LABELS={home:'🏠 Home',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
+const TAB_LABELS={home:'🏠 Home',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',reels:'🎬 Reels',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
 /* ---------- ANDROID HARDWARE/GESTURE BACK BUTTON ----------
  * Capacitor's default behavior for a WebView with no browser navigation history is to just
  * exit the app on back -- since this whole app is a single page with tabs swapped via JS
