@@ -167,6 +167,24 @@ service cloud.firestore {
       );
 
       allow delete: if request.auth != null && request.auth.uid == uid;
+
+      // Reactions on one of the host's published tournaments -- deliberately NOT a field inside
+      // hostProfiles/{uid} itself (an array-of-maps field can't be safely restricted to "only
+      // your own entry changed" in rules; a subcollection of one tiny doc per reaction can).
+      // Doc id is '{historyId}_{followerUid}', which is what makes the create rule below airtight:
+      // a signed-in user can only ever create the ONE doc whose id embeds their own uid, so
+      // there's no way to react as, or on behalf of, anyone else, and at most one reaction per
+      // person per tournament (creating the same id twice just overwrites their own doc).
+      // Reading them (to show a count) is open the same way hostProfiles/{uid} itself is --
+      // knowing a historyId already implies you could see that tournament some other way.
+      match /reactions/{reactionId} {
+        allow read: if request.auth != null;
+        allow create: if request.auth != null &&
+          reactionId == (request.resource.data.historyId + '_' + request.auth.uid) &&
+          request.resource.data.followerUid == request.auth.uid;
+        allow update: if false;
+        allow delete: if request.auth != null && request.auth.uid == resource.data.followerUid;
+      }
     }
 
     // Client-side error log fallback for browser/web users (Crashlytics has no web SDK, and

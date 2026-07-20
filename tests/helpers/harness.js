@@ -80,7 +80,28 @@ function makeFirebaseMock(dbStore){
         cb({ exists, data: () => dbStore[p], id: p.split('/').pop(), metadata: { hasPendingWrites: false } });
         return () => { listeners[p] = (listeners[p] || []).filter(x => x !== cb); };
       },
-      collection: (sub) => ({ doc: (id) => docRef(p + '/' + sub + '/' + id) })
+      collection: (sub) => collectionRef(p + '/' + sub)
+    };
+  }
+  // Minimal collection reference: .doc(id) (used everywhere) plus a .where(field,'==',value).get()
+  // (used for reactions -- one tiny doc per reaction under hostProfiles/{uid}/reactions, counted
+  // via a query instead of mutating a shared array). Only '==' is implemented since that's the
+  // only operator the app actually uses; dbStore is flat (key = full path), so "documents in this
+  // collection" just means keys that start with prefix+'/' and have no further '/' after that.
+  function collectionRef(prefix){
+    return {
+      doc: (id) => docRef(prefix + '/' + id),
+      where: (field, op, value) => ({
+        get: () => {
+          if(op !== '==') return Promise.reject(new Error('mock only supports == queries'));
+          const head = prefix + '/';
+          const docs = Object.keys(dbStore)
+            .filter(k => k.startsWith(head) && !k.slice(head.length).includes('/'))
+            .filter(k => dbStore[k] && dbStore[k][field] === value)
+            .map(k => ({ id: k.slice(head.length), data: () => dbStore[k] }));
+          return Promise.resolve({ docs, size: docs.length, empty: docs.length === 0 });
+        }
+      })
     };
   }
   let authCb = null;
@@ -104,7 +125,7 @@ function makeFirebaseMock(dbStore){
       },
     }), { Auth: { Persistence: { LOCAL: 'local' } }, GoogleAuthProvider: function(){} }),
     firestore: Object.assign(() => ({
-      collection: (name) => ({ doc: (id) => docRef(name + '/' + id) })
+      collection: (name) => collectionRef(name)
     }), {
       FieldValue: {
         arrayUnion: (...items) => ({ __arrayUnion: items }),

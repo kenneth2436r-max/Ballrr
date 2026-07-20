@@ -5826,6 +5826,7 @@ async function previewHostProfile(rawCode){
       return;
     }
     const hostUid=codeSnap.data().uid;
+    lastViewedHostUid=hostUid;
     if(currentUser.uid===hostUid){
       el.innerHTML=`<div class="recap-title">👤 Profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">That's your own host code.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
       return;
@@ -8120,10 +8121,12 @@ function openProfileEntry(id){
     </div>`).join('');
   }
   if(t.note)html+=`<div class="customko-hint" style="margin-top:8px">${esc(t.note)}</div>`;
-  html+=`<button class="theme-btn" style="width:100%;margin-top:14px" onclick="toggleTournamentHighlight('${t.id}')">${t.highlighted?'★ Remove from Highlights':'☆ Add to Highlights'}</button>`;
+  html+='<div id="profile-entry-reaction"></div>';
+  html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="toggleTournamentHighlight('${t.id}')">${t.highlighted?'★ Remove from Highlights':'☆ Add to Highlights'}</button>`;
   html+='<button class="theme-btn" style="width:100%;margin-top:8px" onclick="closeProfileEntry()">Close</button>';
   document.getElementById('profile-entry-content').innerHTML=html;
   document.getElementById('profile-entry-modal').style.display='flex';
+  if(currentUser)loadAndRenderReaction(currentUser.uid,id,'profile-entry-reaction');
 }
 // Instagram-Highlights-style pin -- purely a display flag (highlightsStripHtml() reads it),
 // synced best-effort to the published copy too so followers see the same pin. Never blocks the
@@ -9032,6 +9035,7 @@ async function shareFollowHostLink(){
 // a second Firestore read -- the list was just fetched to build this exact list of buttons.
 let lastPastTournamentsList=null;
 let lastHostFollowerNames=[]; // names of whatever host's profile is currently open in the recap modal
+let lastViewedHostUid=null; // uid behind whatever host profile is currently open in the recap modal -- needed to address their reactions subcollection
 // Follower-facing equivalent of computeCareerLeaderboard() -- combines every PUBLIC archived
 // tournament's embedded snapshot (hostProfiles.pastTournaments[].snapshot) into one all-time
 // leaderboard, built entirely from the host's own published data via the same
@@ -9152,6 +9156,7 @@ function computeFormFromRatings(ratings){
 // confused for each other (an Instagram-profile-style "their stuff vs. my stuff" split).
 async function showHostPastTournaments(){
   if(!followedHost){alert('Follow a host first.');return;}
+  lastViewedHostUid=followedHost.hostUid;
   const hostName=followedHost.hostName||'Their';
   const el=document.getElementById('recap-card-content');
   el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center">Loading…</p>`;
@@ -9277,6 +9282,46 @@ async function viewHostPastTournament(code,visibility,historyId){
     loadSharedTournament(code);
   }
 }
+// Reactions on a specific tournament -- one tiny doc per reaction under
+// hostProfiles/{hostUid}/reactions, id '{historyId}_{followerUid}' (see firestore.rules: this
+// shape is what lets the security rule guarantee someone can only ever create/delete the ONE doc
+// that embeds their own uid, instead of trusting an array field a host or follower could
+// otherwise tamper with). Counted via a query instead of a denormalized counter -- this app has
+// no Cloud Functions to keep a counter in sync, and tournament sizes here are small enough that
+// a live count query is cheap.
+function reactionsCollectionRef(hostUid){
+  return hostProfileDocRef(hostUid).collection('reactions');
+}
+function reactionButtonHtml(hostUid,historyId,count,reactedByMe){
+  const safeHostUid=esc(hostUid).replace(/'/g,"\\'"),safeHistoryId=esc(historyId).replace(/'/g,"\\'");
+  return`<button class="theme-btn" style="width:100%;margin-top:8px${reactedByMe?';background:var(--btn-bg);color:#fff':''}" onclick="toggleReaction('${safeHostUid}','${safeHistoryId}')">${reactedByMe?'❤️':'🤍'} React${count>0?' · '+count:''}</button>`;
+}
+async function loadAndRenderReaction(hostUid,historyId,targetElId){
+  const el=document.getElementById(targetElId);
+  if(!el||!currentUser||!hostUid||!historyId)return;
+  el.dataset.hostUid=hostUid;
+  el.dataset.historyId=historyId;
+  try{
+    const snap=await reactionsCollectionRef(hostUid).where('historyId','==',historyId).get();
+    const reactedByMe=snap.docs.some(d=>d.data().followerUid===currentUser.uid);
+    el.innerHTML=reactionButtonHtml(hostUid,historyId,snap.size,reactedByMe);
+  }catch(e){console.error('Could not load reactions:',e);}
+}
+async function toggleReaction(hostUid,historyId){
+  if(!currentUser){alert('Sign in first.');return;}
+  try{
+    const ref=reactionsCollectionRef(hostUid).doc(historyId+'_'+currentUser.uid);
+    const snap=await ref.get();
+    if(snap.exists)await ref.delete();
+    else await ref.set({historyId,followerUid:currentUser.uid,ts:Date.now()});
+    haptic('tap');
+    // Whichever of the two reaction spots (owner's own tournament detail, or a follower's) is
+    // currently open re-fetches and re-renders itself -- harmless no-op for the other, since its
+    // container element just won't exist in the DOM right now.
+    await loadAndRenderReaction(hostUid,historyId,'profile-entry-reaction');
+    await loadAndRenderReaction(hostUid,historyId,'recap-reaction');
+  }catch(e){console.error('Could not toggle reaction:',e);alert('Could not react right now: '+(e.message||e));}
+}
 // Renders an archived tournament's embedded snapshot (final table + top performers) directly in
 // the recap modal -- no join/follow/network round-trip to the original shared session needed.
 function viewArchivedTournamentSnapshot(entry){
@@ -9305,8 +9350,10 @@ function viewArchivedTournamentSnapshot(entry){
     ${tableRows?`<div class="table-wrap" style="margin-bottom:10px"><table><thead><tr><th>#</th><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>Pts</th></tr></thead><tbody>${tableRows}</tbody></table></div>`:''}
     ${ratingRows?`<div class="edit-title" style="margin-top:0">Top Performers</div>${ratingRows}`:''}
     ${synergyRows?`<div class="section-header">Top Synergy</div>${synergyRows}`:''}
+    <div id="recap-reaction"></div>
     <div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
   document.getElementById('recap-modal').style.display='flex';
+  loadAndRenderReaction(lastViewedHostUid,entry.historyId,'recap-reaction');
 }
 async function showMyHostCode(){
   if(!currentUser){alert('Sign in first.');return;}
