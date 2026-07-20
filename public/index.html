@@ -79,6 +79,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .bottom-nav-btn.active{color:var(--btn-bg)}
 .bottom-nav-icon{font-size:22px;line-height:1}
 .bottom-nav-btn.create .bottom-nav-icon{font-size:26px}
+/* Profile tab -- stats bar + tappable tournament grid (like an Instagram post grid), plus a
+   pill switcher down to the existing Career leaderboard content. Purely additive: the classic
+   Archive and Career tabs (still reachable from the sidebar) are untouched. */
+.profile-stats-bar{display:flex;justify-content:space-around;padding:14px 8px;margin-bottom:14px;background:var(--card-bg);border:1px solid var(--border);border-radius:12px}
+.profile-stat{text-align:center}
+.profile-stat-num{font-size:20px;font-weight:800;color:var(--btn-bg)}
+.profile-stat-label{font-size:11px;color:var(--text-muted);margin-top:2px}
+.profile-pills{display:flex;gap:8px;margin-bottom:14px}
+.profile-pill{flex:1;padding:9px;text-align:center;border-radius:20px;border:1px solid var(--border);background:var(--card-bg);font-size:13px;font-weight:600;color:var(--text-muted);cursor:pointer;-webkit-tap-highlight-color:transparent}
+.profile-pill.active{background:var(--btn-bg);color:#fff;border-color:var(--btn-bg)}
+.profile-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.profile-tile{aspect-ratio:1;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:6px;cursor:pointer;text-align:center;overflow:hidden}
+.profile-tile-icon{font-size:22px}
+.profile-tile-label{font-size:10px;font-weight:700;margin-top:4px;line-height:1.2;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.profile-tile-date{font-size:9px;color:var(--text-muted);margin-top:2px}
 h1{font-size:20px;font-weight:600;margin-bottom:4px}
 .sub{font-size:13px;color:var(--text-muted);margin-bottom:16px}
 .app-header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
@@ -702,6 +717,21 @@ select option{background:var(--input-bg);color:var(--text)}
   <div id="career-container"></div>
 </div>
 
+<!-- PROFILE (Instagram-style: stats bar + tournament grid, with a pill switch down to Career) -->
+<div id="tab-profile" class="section">
+  <div id="profile-stats-bar" class="profile-stats-bar"></div>
+  <div class="profile-pills">
+    <button class="profile-pill active" id="profile-pill-grid" onclick="switchProfilePill('grid')">🗂 Grid</button>
+    <button class="profile-pill" id="profile-pill-career" onclick="switchProfilePill('career')">🏆 Career</button>
+  </div>
+  <div id="profile-grid-view">
+    <div id="profile-grid-container" class="profile-grid"></div>
+  </div>
+  <div id="profile-career-view" style="display:none">
+    <div id="profile-career-container"></div>
+  </div>
+</div>
+
 <!-- HELP / ABOUT -->
 <div id="tab-help" class="section">
   <div class="help-about">
@@ -880,10 +910,10 @@ select option{background:var(--input-bg);color:var(--text)}
 <nav class="bottom-nav" id="bottom-nav">
   <div class="bottom-nav-inner">
     <button class="tab bottom-nav-btn active" onclick="showTab('home',this)"><span class="bottom-nav-icon">🏠</span>Home</button>
-    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('draft',this)"><span class="bottom-nav-icon">🔍</span>Search</button>
+    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('draft',this)"><span class="bottom-nav-icon">🎡</span>Draft</button>
     <button class="bottom-nav-btn create" onclick="openCreateMenu()"><span class="bottom-nav-icon">➕</span>Create</button>
-    <button class="tab bottom-nav-btn" onclick="showTab('matches',this)"><span class="bottom-nav-icon">🎬</span>Reels</button>
-    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('archive',this)"><span class="bottom-nav-icon">👤</span>Profile</button>
+    <button class="tab bottom-nav-btn" onclick="showTab('matches',this)"><span class="bottom-nav-icon">⚽</span>Matches</button>
+    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('profile',this)"><span class="bottom-nav-icon">👤</span>Profile</button>
   </div>
 </nav>
 
@@ -894,6 +924,10 @@ select option{background:var(--input-bg);color:var(--text)}
     <button class="save-btn" style="margin-bottom:10px" onclick="closeCreateMenu();saveTournamentToHistory()">💾 Save Current Tournament</button>
     <button class="theme-btn" style="width:100%" onclick="closeCreateMenu()">Cancel</button>
   </div>
+</div>
+
+<div id="profile-entry-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeProfileEntry()">
+  <div class="wizard-card" id="profile-entry-content" style="max-width:380px"></div>
 </div>
 
 <div id="player-card-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closePlayerCard()">
@@ -7635,8 +7669,9 @@ function computeCareerArchetypes(){
   return archetypes;
 }
 
-function renderCareer(){
-  const el=document.getElementById('career-container');
+function renderCareer(targetId){
+  const el=document.getElementById(targetId||'career-container');
+  if(!el)return;
   const list=computeCareerLeaderboard();
   if(!list.length){
     el.innerHTML='<div class="empty-msg">No career stats yet — play some matches, or save a tournament to the Archive, to start building history</div>';
@@ -7676,6 +7711,85 @@ function renderArchive(){
   if(history.length&&currentUser)html+='<button class="theme-btn" style="width:100%;margin-bottom:10px" onclick="publishAllArchivedTournaments()">👥 Publish all to followers</button>';
   html+=history.length?history.map(archiveEntryHtml).join(''):'<div class="empty-msg">No tournaments saved yet</div>';
   c.innerHTML=html;
+}
+
+// Profile tab -- Instagram-style combined view: a stats bar, a tappable "post grid" of saved
+// tournaments, and a pill switch down to the existing Career leaderboard (reuses renderCareer()
+// unchanged via its optional targetId param below). Entirely additive: the classic Archive and
+// Career tabs, still reachable from the sidebar, are untouched.
+function renderProfile(){
+  renderProfileStats();
+  renderProfileGrid();
+  renderCareer('profile-career-container');
+}
+function renderProfileStats(){
+  const el=document.getElementById('profile-stats-bar');
+  if(!el)return;
+  const tCount=(state.tournamentHistory||[]).length;
+  const pCount=computeCareerLeaderboard().length;
+  const trophyCount=computeTrophyCabinet().reduce((s,t)=>s+t.total,0);
+  el.innerHTML=`
+    <div class="profile-stat"><div class="profile-stat-num">${tCount}</div><div class="profile-stat-label">Tournaments</div></div>
+    <div class="profile-stat"><div class="profile-stat-num">${pCount}</div><div class="profile-stat-label">Players</div></div>
+    <div class="profile-stat"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
+  `;
+}
+function renderProfileGrid(){
+  const el=document.getElementById('profile-grid-container');
+  if(!el)return;
+  const history=(state.tournamentHistory||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
+  if(!history.length){
+    el.innerHTML='<div class="empty-msg" style="grid-column:1/-1">No tournaments saved yet -- save one from the Create menu once you finish it</div>';
+    return;
+  }
+  el.innerHTML=history.map(t=>`
+    <div class="profile-tile" onclick="openProfileEntry('${t.id}')">
+      <span class="profile-tile-icon">🏆</span>
+      <div class="profile-tile-label">${esc(t.label||(t.teamNames||[]).join(' vs '))}</div>
+      <div class="profile-tile-date">${esc(t.date||'')}</div>
+    </div>`).join('');
+}
+function switchProfilePill(which){
+  const gridBtn=document.getElementById('profile-pill-grid'),careerBtn=document.getElementById('profile-pill-career');
+  const gridView=document.getElementById('profile-grid-view'),careerView=document.getElementById('profile-career-view');
+  if(which==='career'){
+    gridBtn.classList.remove('active');careerBtn.classList.add('active');
+    gridView.style.display='none';careerView.style.display='';
+  }else{
+    careerBtn.classList.remove('active');gridBtn.classList.add('active');
+    careerView.style.display='none';gridView.style.display='';
+  }
+  haptic('tap');
+}
+function openProfileEntry(id){
+  const t=(state.tournamentHistory||[]).find(x=>x.id===id);
+  if(!t)return;
+  const topRatings=(t.playerStats||[]).slice().sort((a,b)=>b.avg-a.avg).slice(0,8);
+  const topSynergy=(t.synergy||[]).slice().sort((a,b)=>b.output-a.output).slice(0,3);
+  let html=`<div class="edit-title" style="margin-bottom:4px">${esc(t.label||(t.teamNames||[]).join(' vs '))}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">${esc(t.date||'')}</div>`;
+  html+='<div class="table-wrap"><table><thead><tr><th>#</th><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>Pts</th></tr></thead><tbody>';
+  html+=(t.table||[]).map((row,i)=>`<tr><td>${i+1}</td><td style="text-align:left">${esc(row.name)}</td><td>${row.p}</td><td>${row.w}</td><td>${row.d}</td><td>${row.l}</td><td>${row.gf}</td><td>${row.ga}</td><td>${(row.gd>=0?'+':'')+row.gd}</td><td class="pts">${row.pts}</td></tr>`).join('');
+  html+='</tbody></table></div>';
+  html+='<div class="section-header">Player Ratings</div>';
+  html+=topRatings.length?topRatings.map((p,i)=>`<div class="scorer-item">
+      <div><span class="rank">${i+1}.</span>${posBadge(p.position)} <strong>${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team)} · ${p.count} match${p.count===1?'':'es'} · ${p.goals}⚽ ${p.assists}🅰)</span></div>
+      ${ratingBadge(p.avg)}
+    </div>`).join(''):'<div class="empty-msg">No ratings recorded for this tournament</div>';
+  if(topSynergy.length){
+    html+='<div class="section-header">Top Synergy</div>';
+    html+=topSynergy.map(p=>`<div class="scorer-item">
+      <div><strong>${esc(p.a)}</strong> &amp; <strong>${esc(p.b)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team)})</span></div>
+      <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.output.toFixed(1)}</span>
+    </div>`).join('');
+  }
+  if(t.note)html+=`<div class="customko-hint" style="margin-top:8px">${esc(t.note)}</div>`;
+  html+='<button class="theme-btn" style="width:100%;margin-top:14px" onclick="closeProfileEntry()">Close</button>';
+  document.getElementById('profile-entry-content').innerHTML=html;
+  document.getElementById('profile-entry-modal').style.display='flex';
+}
+function closeProfileEntry(){
+  document.getElementById('profile-entry-modal').style.display='none';
 }
 
 function setTheme(mode){
@@ -8016,7 +8130,7 @@ function switchAppMode(mode){
   renderAppModeUI();
   haptic('tap');
 }
-const QUICKMATCH_HIDDEN_TABS=['table','scorers','lineups','draft','allresults','archive','career'];
+const QUICKMATCH_HIDDEN_TABS=['table','scorers','lineups','draft','allresults','archive','career','profile'];
 function renderAppModeUI(){
   const isQuick=state.appMode==='quickmatch';
   const tBtn=document.getElementById('appmode-btn-tournament');
@@ -9321,7 +9435,7 @@ function renderAll(){
   updatePendingApprovalUI();
   if(isPendingApproval())return; // nothing else to render -- the waiting screen covers everything
   document.body.classList.toggle('viewer-mode',isViewerMode());
-  const steps=[renderSub,renderHome,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderArchive,renderCareer,renderSettings];
+  const steps=[renderSub,renderHome,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderArchive,renderCareer,renderProfile,renderSettings];
   steps.forEach(fn=>{
     try{fn();}catch(e){console.error('Render step failed:',fn.name,e);}
   });
@@ -9358,7 +9472,7 @@ function updatePendingApprovalUI(){
 // 'knockout' is kept as an alias for 'matches' -- the Knockout tab was merged into Matches, but
 // a few other places (cue cards, the Home screen's shortcut cards) may still reference the old
 // tab name by habit, and this keeps the tab pill label sensible if so instead of showing "knockout".
-const TAB_LABELS={home:'🏠 Home',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',archive:'🗂 Archive',career:'🏆 Career',help:'ℹ️ Help',settings:'⚙ Settings'};
+const TAB_LABELS={home:'🏠 Home',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
 /* ---------- ANDROID HARDWARE/GESTURE BACK BUTTON ----------
  * Capacitor's default behavior for a WebView with no browser navigation history is to just
  * exit the app on back -- since this whole app is a single page with tabs swapped via JS
