@@ -5547,13 +5547,19 @@ async function consumePendingFollow(){
 // and, if they already have something live right now, drops the visitor straight into it just
 // like tapping the "just went live" notice would (public: instant view; private: queues a view
 // request). If nothing's live right now, the follow still completes and this falls back to the
-// visitor's own private tournament instead of leaving the loading gate stuck.
+// visitor's own private tournament -- but that alone left the visitor staring at their own
+// unrelated home screen with zero indication anything happened or where the host's actual
+// tournaments were, which is exactly what looked like "the follow link is broken". So when
+// there's nothing live to jump into, this now also auto-opens the same "Past tournaments" list
+// the "Browse their past tournaments" button opens, landing the visitor directly on the host's
+// real archive instead of leaving them to find it themselves.
 async function consumePendingFollowHost(){
   if(!pendingFollowHostCode||!currentUser)return;
   const code=pendingFollowHostCode;
   pendingFollowHostCode=null;
   await followHost(code);
   const followed=getFollowedHost();
+  let jumpedIntoLive=false;
   if(followed){
     try{
       const snap=await hostProfileDocRef(followed.hostUid).get();
@@ -5566,12 +5572,14 @@ async function consumePendingFollowHost(){
       if(d&&d.latestCode&&(await sharedMetaDocRef(d.latestCode).get()).exists){
         if(d.latestVisibility==='private')await requestFollowApproval(d.latestCode);
         else await followSharedTournament(d.latestCode);
+        jumpedIntoLive=true;
       }
     }catch(e){console.error('Could not check for a live tournament after following host:',e);}
   }
   const activeCode=getActiveSharedCode();
   if(activeCode)loadSharedTournament(activeCode);
   else loadPrivateTournament();
+  if(followed&&!jumpedIntoLive)showHostPastTournaments();
 }
 // Mirrors consumePendingFollow() for the edit-access invite link.
 async function consumePendingJoin(){

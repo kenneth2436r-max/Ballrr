@@ -176,6 +176,36 @@ test('consumePendingFollowHost silently skips a stale/dead latestCode instead of
   assert.ok((dbStore['hostProfiles/hostUid'].followers || []).includes('followerUid'), 'the host follow itself should still succeed');
 });
 
+// Regression test for: a visitor tapping a ?followhost= link, following successfully, but
+// landing on their OWN unrelated tournament with no indication anything happened or where to
+// find the host's actual archive -- looked exactly like "the follow link is broken" even though
+// the follow itself worked. consumePendingFollowHost() now auto-opens the same "Past
+// tournaments" list the "Browse their past tournaments" button opens whenever there's nothing
+// currently live to jump into instead.
+test('consumePendingFollowHost auto-opens the host\'s past tournaments list when nothing is live, instead of leaving the visitor on their own unrelated tournament', async () => {
+  const dbStore = {};
+  dbStore['hostCodes/ABCDEF'] = { uid: 'hostUid' };
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan', hostCode: 'ABCDEF', followers: [], followerNames: {},
+    // No latestCode at all -- this host has archived tournaments but nothing currently live.
+    pastTournaments: [
+      { code: 'CODE1', historyId: 'hist1', label: 'Summer Cup', startedAt: 1000, visibility: 'public', archived: true, snapshot: { table: [], playerStats: [] } },
+    ],
+  };
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'followerUid', displayName:'Fan' };
+    state = {};
+    pendingFollowHostCode = 'ABCDEF';
+    window.__followHostDone = consumePendingFollowHost();
+  `);
+  await window.__followHostDone;
+  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+
+  const html = window.document.getElementById('recap-card-content').innerHTML;
+  assert.ok(html.includes('Summer Cup'), 'the host\'s past tournaments list should be showing, not left closed');
+});
+
 test('the organizer can approve a pending follower request, granting view access and clearing the queue', async () => {
   const dbStore = {};
   dbStore['shared/PRIVCODE'] = { ownerId: 'hostUid', ownerName: 'Aaryan', members: ['hostUid'], pendingRequests: [], memberNames: { hostUid: 'Aaryan' }, followers: [], followerNames: { followerUid: 'Fan' }, pendingFollowerRequests: ['followerUid'], requireApproval: false, visibility: 'private' };
