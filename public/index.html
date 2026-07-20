@@ -58,7 +58,7 @@
 .match-card,.ko-card,.result-card,.edit-section,.stage-card,.roster-card,.tab,input,select,textarea,.match-timer,.chip{transition:background 0.2s ease,border-color 0.2s ease,color 0.2s ease}
 html{background:var(--bg)}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:15px;min-height:100vh;min-height:100dvh;transition:background 0.2s ease,color 0.2s ease}
-.app{max-width:460px;margin:0 auto;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+.app{max-width:460px;margin:0 auto;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(86px,calc(70px + env(safe-area-inset-bottom))) max(16px,env(safe-area-inset-left))}
 /* Phones are almost always narrower than 460px anyway, so this cap never even kicks in there --
    it only ever mattered on tablets/desktop, where it left the whole app boxed into a narrow
    column with large empty margins on both sides ("limited to the middle of the screen"). Widen
@@ -66,6 +66,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
    the phone experience completely untouched. */
 @media (min-width:700px){.app{max-width:680px}}
 @media (min-width:1000px){.app{max-width:900px}}
+/* Instagram-style bottom nav -- purely additive: the existing hamburger sidebar (and every one
+   of its tabs) is completely untouched, this just adds a second, quicker way to reach the 5 most
+   common destinations. Reuses showTab(name,this) directly on Home/Search/Reels/Profile so their
+   active-state highlighting, quickmatch-mode hide/show (data-mode="tournament"), and tab history
+   all keep working exactly like the sidebar's own buttons -- no new logic needed for any of that. */
+.bottom-nav{position:fixed;left:0;right:0;bottom:0;z-index:9990;background:var(--card-bg);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 20px rgba(0,0,0,0.15)}
+.bottom-nav-inner{display:flex;justify-content:space-around;align-items:center;width:100%;max-width:460px;margin:0 auto;padding:6px max(8px,env(safe-area-inset-left)) 6px max(8px,env(safe-area-inset-right))}
+@media (min-width:700px){.bottom-nav-inner{max-width:680px}}
+@media (min-width:1000px){.bottom-nav-inner{max-width:900px}}
+.bottom-nav-btn{background:none;border:none;display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10px;font-weight:600;color:var(--text-muted);cursor:pointer;padding:6px 10px;border-radius:10px;-webkit-tap-highlight-color:transparent}
+.bottom-nav-btn.active{color:var(--btn-bg)}
+.bottom-nav-icon{font-size:22px;line-height:1}
+.bottom-nav-btn.create .bottom-nav-icon{font-size:26px}
 h1{font-size:20px;font-weight:600;margin-bottom:4px}
 .sub{font-size:13px;color:var(--text-muted);margin-bottom:16px}
 .app-header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
@@ -862,6 +875,25 @@ select option{background:var(--input-bg);color:var(--text)}
     <button id="reset-btn" onclick="resetAll()" style="width:100%;padding:10px;background:#fff;border:1px solid #e24b4a;border-radius:8px;color:#a32d2d;font-size:13px;font-weight:600;cursor:pointer">Reset Tournament</button>
   </div>
 </div>
+</div>
+
+<nav class="bottom-nav" id="bottom-nav">
+  <div class="bottom-nav-inner">
+    <button class="tab bottom-nav-btn active" onclick="showTab('home',this)"><span class="bottom-nav-icon">🏠</span>Home</button>
+    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('draft',this)"><span class="bottom-nav-icon">🔍</span>Search</button>
+    <button class="bottom-nav-btn create" onclick="openCreateMenu()"><span class="bottom-nav-icon">➕</span>Create</button>
+    <button class="tab bottom-nav-btn" onclick="showTab('matches',this)"><span class="bottom-nav-icon">🎬</span>Reels</button>
+    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('archive',this)"><span class="bottom-nav-icon">👤</span>Profile</button>
+  </div>
+</nav>
+
+<div id="create-menu-overlay" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeCreateMenu()">
+  <div class="wizard-card" style="max-width:340px">
+    <div class="edit-title" style="margin-bottom:14px">Create</div>
+    <button class="save-btn" style="margin-bottom:10px" onclick="closeCreateMenu();openTournamentWizard()">🏁 Start a Tournament</button>
+    <button class="save-btn" style="margin-bottom:10px" onclick="closeCreateMenu();saveTournamentToHistory()">💾 Save Current Tournament</button>
+    <button class="theme-btn" style="width:100%" onclick="closeCreateMenu()">Cancel</button>
+  </div>
 </div>
 
 <div id="player-card-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closePlayerCard()">
@@ -5169,6 +5201,15 @@ function showPlayerCard(name){
 }
 function closePlayerCard(){
   document.getElementById('player-card-modal').style.display='none';
+}
+// Bottom-nav "Create" action sheet -- purely additive UI, reuses the two existing entry points
+// (openTournamentWizard/saveTournamentToHistory) that the sidebar/menu already trigger elsewhere,
+// so no new tournament-creation logic lives here.
+function openCreateMenu(){
+  document.getElementById('create-menu-overlay').style.display='flex';
+}
+function closeCreateMenu(){
+  document.getElementById('create-menu-overlay').style.display='none';
 }
 // Follower-facing player card -- visually the same FIFA-card layout as the host's own
 // showPlayerCard(), but entirely from the host's PUBLISHED data (lastPastTournamentsList,
