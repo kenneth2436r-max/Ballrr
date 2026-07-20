@@ -2188,6 +2188,7 @@ function disbandSharedTournament(){
       return;
     }
     removeLivePointerFromFollowers(code); // best-effort, never blocks the disband itself
+    clearLatestLiveFromHostProfile(code); // best-effort, same reasoning
     setActiveSharedCode(null);
     sharedMeta=null;
     if(cloudUnsub){cloudUnsub();cloudUnsub=null;}
@@ -2212,6 +2213,22 @@ async function removeLivePointerFromFollowers(code){
     const pastTournaments=priorPast.filter(t=>!(t.code===code&&!t.historyId));
     await ref.set({pastTournaments},{merge:true});
   }catch(e){console.error('Could not clean up live pointer after disband:',e);}
+}
+// Regression fix for: a brand-new follower tapping a ?followhost= direct link (see
+// consumePendingFollowHost()) landing on "This tournament is no longer available" even though
+// the host has nothing live right now. Root cause: latestCode/latestVisibility/latestStartedAt/
+// latestLabel on hostProfiles are set once by startSharingTournament() but were never cleared on
+// disband, so they kept pointing at the just-deleted shared/{code} doc forever (or until the host
+// started a fresh share). Cleared here, only when they still point at the code being disbanded --
+// best-effort, never blocks the disband itself if it fails.
+async function clearLatestLiveFromHostProfile(code){
+  if(!currentUser)return;
+  try{
+    const ref=hostProfileDocRef(currentUser.uid);
+    const profSnap=await ref.get();
+    if(!profSnap.exists||profSnap.data().latestCode!==code)return;
+    await ref.set({latestCode:null,latestVisibility:null,latestStartedAt:0,latestLabel:null},{merge:true});
+  }catch(e){console.error('Could not clear latest-live pointer after disband:',e);}
 }
 
 function copyShareCode(){
@@ -3901,7 +3918,7 @@ function saveTournamentToHistory(){
         date:(dateStr.trim()||todayStr),
         label:finalLabel,
         ...snap,
-        visibility:sharedMeta?(sharedMeta.visibility||'public'):null,
+        visibility:sharedMeta?(sharedMeta.visibility||'public'):'public',
         savedAt:Date.now()
       });
       // This live tournament's stats are now duplicated inside tournamentHistory -- flag it so
@@ -3918,8 +3935,10 @@ function saveTournamentToHistory(){
 
 // Entry point from the Archive tab's "Followers: change visibility" button. Looks up the entry's
 // CURRENT visibility straight from hostProfiles (rather than trusting a local field) so this works
-// even for tournaments saved before this feature existed, which never had a visibility recorded
-// locally at all -- only ones actually published to followers can be changed.
+// even for tournaments saved before this feature existed. If it was never published at all --
+// most commonly a tournament saved before the publishArchivedTournamentToFollowers() fix that
+// made local (non-live-shared) saves publish automatically -- offers to publish it now instead
+// of just refusing, since nothing about viewing an archived snapshot needs a live session at all.
 async function openArchivedVisibilityControl(historyId){
   if(!currentUser){alert('Sign in first.');return;}
   try{
@@ -3927,7 +3946,13 @@ async function openArchivedVisibilityControl(historyId){
     const snap=await ref.get();
     const priorPast=(snap.exists&&Array.isArray(snap.data().pastTournaments))?snap.data().pastTournaments:[];
     const pub=priorPast.find(t=>t.historyId===historyId);
-    if(!pub){alert("This tournament was never shared with your followers, so there's nothing to change.");return;}
+    if(!pub){
+      showThemedConfirm(
+        "This tournament was never shared with your followers -- publish it now so they can see it (public, no approval needed)?",
+        ()=>{publishArchivedTournamentNow(historyId);}
+      );
+      return;
+    }
     const isPrivate=pub.visibility==='private';
     showThemedConfirm(
       isPrivate
@@ -3938,6 +3963,33 @@ async function openArchivedVisibilityControl(historyId){
   }catch(e){
     console.error('Could not check tournament visibility:',e);
     alert('Could not check visibility right now: '+(e.message||e));
+  }
+}
+// Publishes an already-saved Archive entry to followers for the first time, entirely after the
+// fact -- covers tournaments saved before publishArchivedTournamentToFollowers() started
+// publishing local (non-live-shared) saves automatically. Builds the snapshot straight from this
+// entry's own already-computed table/playerStats, same shape as a fresh publish.
+async function publishArchivedTournamentNow(historyId){
+  const entry=(state.tournamentHistory||[]).find(t=>t.id===historyId);
+  if(!entry){alert('Could not find that tournament.');return;}
+  try{
+    const hCode=await ensureHostCode();
+    if(!hCode){alert('Could not set up your host profile right now.');return;}
+    const ref=hostProfileDocRef(currentUser.uid);
+    const profSnap=await ref.get();
+    const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
+    if(priorPast.some(t=>t.historyId===historyId))return; // already published -- nothing to do
+    const trimmedSnapshot={numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats};
+    const newEntry={code:getActiveSharedCode()||'',historyId,label:entry.label,startedAt:entry.savedAt||Date.now(),dateStr:entry.date||'',visibility:'public',archived:true,snapshot:trimmedSnapshot};
+    const pastTournaments=[newEntry,...priorPast].slice(0,40);
+    await ref.set({pastTournaments},{merge:true});
+    entry.visibility='public';
+    saveState();
+    renderArchive();
+    alert('Done -- followers can now view this tournament.');
+  }catch(e){
+    console.error('Could not publish tournament to followers:',e);
+    alert('Could not publish right now: '+(e.message||e));
   }
 }
 // Lets the organizer flip an already-saved Archive entry's visibility after the fact -- e.g.
@@ -4007,20 +4059,31 @@ function deleteHistoryEntry(id){
 // gated behind requestFollowApproval()/the shared/{code} doc, and so still going dark once that
 // session is disbanded. That's an accepted, narrower limitation in exchange for not leaking
 // private data -- see viewHostPastTournament()'s fallback for entries with no snapshot.
-// Best-effort and silent on failure -- never blocks the save that already succeeded locally, and
-// a purely local/never-shared tournament (no active shared code) has nothing to publish at all.
+//
+// This publishes regardless of whether a shared session happens to be active at save time --
+// an earlier version required getActiveSharedCode()/sharedMeta to be set, which meant a
+// tournament tracked purely locally (never live-shared) silently never showed up for followers
+// at all. That was the actual remaining cause behind "my followers only see some of my
+// tournaments": most saves genuinely aren't happening mid-share. If there IS a currently active
+// shared session, only ITS owner may publish (a co-editor saving from someone else's session
+// must never publish under their own follower list) and it inherits that session's chosen
+// visibility; otherwise it's the signed-in user's own local data, published under their own
+// profile, defaulting to public -- same default-public policy as everywhere else now.
+// Best-effort and silent on failure -- never blocks the save that already succeeded locally.
 async function publishArchivedTournamentToFollowers(historyId,label,dateStr,snapshot){
-  const code=getActiveSharedCode();
-  if(!code||!currentUser||!sharedMeta||sharedMeta.ownerId!==currentUser.uid)return;
+  if(!currentUser)return;
+  if(sharedMeta&&sharedMeta.ownerId!==currentUser.uid)return;
+  const visibility=sharedMeta?(sharedMeta.visibility||'public'):'public';
   try{
     const hCode=await ensureHostCode();
     if(!hCode)return;
     const ref=hostProfileDocRef(currentUser.uid);
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
-    const isPrivate=sharedMeta.visibility==='private';
+    const isPrivate=visibility==='private';
     const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats}:null;
-    const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility:sharedMeta.visibility||'public',archived:true,snapshot:trimmedSnapshot};
+    const code=sharedMeta?sharedMeta.code:(getActiveSharedCode()||'');
+    const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility,archived:true,snapshot:trimmedSnapshot};
     // Smaller cap than before (40 vs the old 60) -- each entry now carries real tournament data,
     // not just a one-line pointer, so the doc grows faster per entry.
     const pastTournaments=[entry,...priorPast].slice(0,40);
@@ -5495,7 +5558,12 @@ async function consumePendingFollowHost(){
     try{
       const snap=await hostProfileDocRef(followed.hostUid).get();
       const d=snap.exists?snap.data():null;
-      if(d&&d.latestCode){
+      // Defensively re-check that latestCode's own shared/{code} doc still actually exists
+      // before redirecting into it -- clearLatestLiveFromHostProfile() clears this on disband
+      // going forward, but a first-time follower landing here should never see the alarming
+      // "no longer available" popup just because there's currently nothing live; silently fall
+      // through to their own tournament instead, same as if the host had never shared at all.
+      if(d&&d.latestCode&&(await sharedMetaDocRef(d.latestCode).get()).exists){
         if(d.latestVisibility==='private')await requestFollowApproval(d.latestCode);
         else await followSharedTournament(d.latestCode);
       }

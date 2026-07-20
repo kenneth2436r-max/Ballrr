@@ -144,6 +144,38 @@ test('a follower\'s listener detects a newly-live PRIVATE tournament: tapping it
   assert.ok(!(dbStore['shared/PRIVCODE'].followers || []).includes('followerUid'), 'must not get view access before the organizer approves');
 });
 
+// Regression test for: a brand-new follower tapping a ?followhost= direct link (see
+// followHostLinkUrl()/consumePendingFollowHost()) seeing "This tournament is no longer
+// available" even though the host has nothing live right now. Root cause: hostProfiles'
+// latestCode/latestVisibility/latestStartedAt/latestLabel are set once by
+// startSharingTournament() but were never cleared when the host later disbanded that session,
+// so they kept pointing at a deleted shared/{code} doc. clearLatestLiveFromHostProfile() now
+// cleans this up on disband going forward, but consumePendingFollowHost() also defensively
+// re-checks the doc actually exists before redirecting -- belt and braces, since a first-time
+// follow should never surface a scary dead-link alert just because nothing's live right now.
+test('consumePendingFollowHost silently skips a stale/dead latestCode instead of surfacing "no longer available"', async () => {
+  const dbStore = {};
+  dbStore['hostCodes/ABCDEF'] = { uid: 'hostUid' };
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan', hostCode: 'ABCDEF', followers: [], followerNames: {},
+    latestCode: 'DEADCODE', latestVisibility: 'public', latestStartedAt: Date.now(), latestLabel: 'Old tournament',
+  };
+  // Deliberately NOT populating dbStore['shared/DEADCODE'] -- simulates a disbanded session
+  // whose latestCode pointer was never cleaned up (the exact bug this test guards against).
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'followerUid', displayName:'Fan' };
+    state = {};
+    pendingFollowHostCode = 'ABCDEF';
+    window.__followHostDone = consumePendingFollowHost();
+  `);
+  await window.__followHostDone;
+  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+
+  assert.ok(!window.__alerts.some(m => m.includes('no longer available')), 'a first-time follow must never surface the dead-session alert');
+  assert.ok((dbStore['hostProfiles/hostUid'].followers || []).includes('followerUid'), 'the host follow itself should still succeed');
+});
+
 test('the organizer can approve a pending follower request, granting view access and clearing the queue', async () => {
   const dbStore = {};
   dbStore['shared/PRIVCODE'] = { ownerId: 'hostUid', ownerName: 'Aaryan', members: ['hostUid'], pendingRequests: [], memberNames: { hostUid: 'Aaryan' }, followers: [], followerNames: { followerUid: 'Fan' }, pendingFollowerRequests: ['followerUid'], requireApproval: false, visibility: 'private' };

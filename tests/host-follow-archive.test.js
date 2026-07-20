@@ -105,14 +105,26 @@ test('publishArchivedTournamentToFollowers prepends, so multiple archived tourna
   assert.ok(list.some(t=>t.historyId==='hist2'));
 });
 
-test('publishArchivedTournamentToFollowers does nothing when there is no active shared session (a purely local/private save)', async () => {
+// Regression test for: "but again I have 4 tournaments in total so why do the followers only
+// see 2?" -- root cause: publishArchivedTournamentToFollowers() used to require an ACTIVE shared
+// session (getActiveSharedCode() + sharedMeta) to do anything at all, so any tournament saved
+// while not currently live-sharing (the common case) silently never reached followers, no matter
+// how many times "Save Tournament" was used. It now always publishes the signed-in user's own
+// local saves too, defaulting to public.
+test('publishArchivedTournamentToFollowers still publishes a purely local save with no active shared session -- defaults to public, since it is the signed-in user\'s own data', async () => {
   const dbStore = {};
   dbStore['hostProfiles/hostUid'] = { hostName: 'Aaryan', hostCode: 'ABCDEF', followers: [], followerNames: {}, pastTournaments: [] };
   const { window } = freshWindow({ dbStore }); // no activeCode
   runInOneEval(window, `currentUser = { uid:'hostUid', displayName:'Aaryan' }; sharedMeta = null;`);
-  await window.publishArchivedTournamentToFollowers('hist1', 'Solo save', '2026-07-01');
+  const snapshot = { numTeams: 2, legs: 1, teamNames: ['Red', 'Blue'], table: [{ name: 'Red' }], playerStats: [{ name: 'Densil' }] };
+  await window.publishArchivedTournamentToFollowers('hist1', 'Solo save', '2026-07-01', snapshot);
   for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
-  assert.deepStrictEqual(Array.from(dbStore['hostProfiles/hostUid'].pastTournaments), []);
+
+  const list = dbStore['hostProfiles/hostUid'].pastTournaments;
+  assert.strictEqual(list.length, 1, 'a tournament saved with no live share session active must still reach followers');
+  assert.strictEqual(list[0].historyId, 'hist1');
+  assert.strictEqual(list[0].visibility, 'public');
+  assert.ok(list[0].snapshot, 'defaulting to public means the snapshot should be embedded');
 });
 
 test('publishArchivedTournamentToFollowers does nothing for a non-owner member (would fail Firestore rules anyway)', async () => {
@@ -229,6 +241,57 @@ test('disbanding removes the dead "live" pointer entry but keeps archived entrie
   assert.ok(list.some(t=>t.historyId==='hist1'), 'the archived tournament entry must survive the disband');
 });
 
+// Regression test for: a follower using the ?followhost= direct link seeing "no longer
+// available" -- root cause was hostProfiles.latestCode never getting cleared on disband. This
+// checks the other half of that fix: disbanding must null out latestCode/latestVisibility/
+// latestStartedAt/latestLabel so a brand-new follower's consumePendingFollowHost() has nothing
+// stale to redirect into.
+test('disbanding clears the host profile\'s latestCode/latestVisibility/latestStartedAt/latestLabel so a new follower is never redirected into a dead session', async () => {
+  const dbStore = {};
+  dbStore['shared/CODE1'] = { ownerId: 'hostUid', ownerName: 'Aaryan', members: ['hostUid'], pendingRequests: [], memberNames: { hostUid: 'Aaryan' }, followers: [], followerNames: {}, pendingFollowerRequests: [], requireApproval: false, visibility: 'public' };
+  dbStore['shared/CODE1/payload/main'] = { data: JSON.stringify({ tournamentHistory: [] }), updatedAt: 1 };
+  dbStore['hostProfiles/hostUid'] = {
+    latestCode: 'CODE1', latestVisibility: 'public', latestStartedAt: 5000, latestLabel: 'Session (live)',
+    pastTournaments: [{ code: 'CODE1', label: 'Session (live)', startedAt: 5000, visibility: 'public' }],
+  };
+  const { window, triggerAuth } = freshWindow({ dbStore, activeCode: 'CODE1' });
+  runInOneEval(window, '');
+  triggerAuth({ uid: 'hostUid', displayName: 'Aaryan' });
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  window.disbandSharedTournament(); // window.confirm defaults to true
+  for(let i=0;i<20;i++) await new Promise(r=>setTimeout(r,0));
+
+  const profile = dbStore['hostProfiles/hostUid'];
+  assert.strictEqual(profile.latestCode, null);
+  assert.strictEqual(profile.latestVisibility, null);
+  assert.strictEqual(profile.latestStartedAt, 0);
+  assert.strictEqual(profile.latestLabel, null);
+});
+
+// Companion test: a session the host is CURRENTLY disbanding must not clobber a DIFFERENT,
+// still-live session's latestCode if for some reason they don't match (defensive guard in
+// clearLatestLiveFromHostProfile() -- only clears when latestCode still equals the code being
+// disbanded).
+test('disbanding does not clear latestCode if it already points at a different, newer session', async () => {
+  const dbStore = {};
+  dbStore['shared/CODE1'] = { ownerId: 'hostUid', ownerName: 'Aaryan', members: ['hostUid'], pendingRequests: [], memberNames: { hostUid: 'Aaryan' }, followers: [], followerNames: {}, pendingFollowerRequests: [], requireApproval: false, visibility: 'public' };
+  dbStore['shared/CODE1/payload/main'] = { data: JSON.stringify({ tournamentHistory: [] }), updatedAt: 1 };
+  dbStore['hostProfiles/hostUid'] = {
+    latestCode: 'CODE2', latestVisibility: 'public', latestStartedAt: 9000, latestLabel: 'A newer session',
+    pastTournaments: [],
+  };
+  const { window, triggerAuth } = freshWindow({ dbStore, activeCode: 'CODE1' });
+  runInOneEval(window, '');
+  triggerAuth({ uid: 'hostUid', displayName: 'Aaryan' });
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  window.disbandSharedTournament();
+  for(let i=0;i<20;i++) await new Promise(r=>setTimeout(r,0));
+
+  assert.strictEqual(dbStore['hostProfiles/hostUid'].latestCode, 'CODE2', "a different session's latest pointer must be untouched");
+});
+
 // Regression tests for: "my last tournament was set to private but I want it to be public now" --
 // lets the organizer flip an already-saved Archive entry's visibility after the fact, straight
 // from the Archive tab, without needing the original shared/{code} session to still exist.
@@ -281,15 +344,44 @@ test('setArchivedTournamentVisibility makes a public archived entry private, str
   assert.strictEqual(entry.snapshot, null, 'the snapshot must be removed once private -- hostProfiles has no per-follower approval gate');
 });
 
-test('openArchivedVisibilityControl tells the organizer there is nothing to change if this tournament was never shared with followers', async () => {
+// Covers the pre-existing tournaments that predate publishArchivedTournamentToFollowers()
+// publishing local saves automatically -- openArchivedVisibilityControl() now offers to publish
+// them retroactively instead of just refusing with "nothing to change".
+test('openArchivedVisibilityControl offers to publish a never-shared tournament now, and confirming does so (backfill for pre-existing saves)', async () => {
   const dbStore = {};
   dbStore['hostProfiles/hostUid'] = { pastTournaments: [] };
-  const { window } = freshWindow({ dbStore });
-  const r = runInOneEval(window, `currentUser = { uid:'hostUid', displayName:'Aaryan' };`);
+  const { window } = freshWindow({ dbStore }); // window.confirm defaults to true
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [
+      { id:'hist-never-shared', numTeams:2, legs:1, teamNames:['Red','Blue'],
+        table:[{ name:'Red' }], playerStats:[{ name:'Densil' }], label:'Backfilled Cup', date:'2026-07-10' }
+    ] };
+  `);
   await window.openArchivedVisibilityControl('hist-never-shared');
   for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
 
-  assert.ok(window.__alerts.some(m=>m.includes('never shared')), 'should explain there is nothing to change rather than silently doing nothing');
+  const list = dbStore['hostProfiles/hostUid'].pastTournaments;
+  assert.strictEqual(list.length, 1, 'confirming should publish it for the first time');
+  assert.strictEqual(list[0].historyId, 'hist-never-shared');
+  assert.strictEqual(list[0].visibility, 'public');
+  assert.ok(list[0].snapshot, 'the backfilled entry should carry a real snapshot built from the local history entry');
+});
+
+test('publishArchivedTournamentNow does nothing if the tournament was already published (no duplicate entry)', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    pastTournaments: [{ code: 'CODE1', historyId: 'hist1', label: 'Already published', archived: true, visibility: 'public', snapshot: { table: [], playerStats: [] } }],
+  };
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [{ id:'hist1', numTeams:2, legs:1, teamNames:['Red','Blue'], table:[], playerStats:[], label:'Already published' }] };
+  `);
+  await window.publishArchivedTournamentNow('hist1');
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  assert.strictEqual(dbStore['hostProfiles/hostUid'].pastTournaments.length, 1, 'must not create a second entry for an already-published tournament');
 });
 
 test('openArchivedVisibilityControl confirms, then flips a private published entry to public (full flow via the Archive tab button)', async () => {
