@@ -457,3 +457,54 @@ test('showHostPastTournaments renders the host\'s profile as a Career leaderboar
   assert.ok(html.includes('Summer Cup'), 'the public tournament should still be listed in the Archive section');
   assert.ok(html.includes('Private Cup'), 'the private tournament should still be listed in the Archive section (just without contributing to Career)');
 });
+
+// Regression test for: "the stats showing for the follower is all wrong" -- root cause was 2 of
+// 4 real tournaments predating the auto-publish fix, so only 2 counted toward the follower's
+// Career leaderboard while the host's own Career tab (built from all local tournamentHistory)
+// counted 4. publishAllArchivedTournaments() is the one-tap fix: backfill every tournament that
+// hasn't reached followers yet, in a single write, instead of doing it one entry at a time.
+test('publishAllArchivedTournaments backfills only the tournaments not yet published, leaving already-published entries untouched', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    pastTournaments: [
+      { code: 'CODE1', historyId: 'hist-old', label: 'Already published', archived: true, visibility: 'public', snapshot: { table: [], playerStats: [{ name: 'ShouldNotChange' }] } },
+    ],
+  };
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [
+      { id:'hist-old', numTeams:2, legs:1, teamNames:['Red','Blue'], table:[], playerStats:[{ name:'AlreadyPublished' }], label:'Already published', date:'2026-07-01' },
+      { id:'hist-new1', numTeams:2, legs:1, teamNames:['Red','Blue'], table:[{ name:'Red' }], playerStats:[{ name:'Densil' }], label:'Never published 1', date:'2026-07-08' },
+      { id:'hist-new2', numTeams:2, legs:1, teamNames:['Red','Blue'], table:[{ name:'Red' }], playerStats:[{ name:'Sam' }], label:'Never published 2', date:'2026-07-04' },
+    ] };
+  `);
+  await window.publishAllArchivedTournaments();
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  const list = dbStore['hostProfiles/hostUid'].pastTournaments;
+  assert.strictEqual(list.length, 3, 'the 2 missing tournaments should be added, alongside the 1 already there');
+  const old = list.find(t=>t.historyId==='hist-old');
+  assert.strictEqual(old.snapshot.playerStats[0].name, 'ShouldNotChange', 'an already-published entry must be left completely untouched, not overwritten with the local data');
+  const new1 = list.find(t=>t.historyId==='hist-new1');
+  const new2 = list.find(t=>t.historyId==='hist-new2');
+  assert.ok(new1 && new1.visibility === 'public' && new1.snapshot.playerStats[0].name === 'Densil');
+  assert.ok(new2 && new2.visibility === 'public' && new2.snapshot.playerStats[0].name === 'Sam');
+});
+
+test('publishAllArchivedTournaments tells the organizer there is nothing to do when everything is already published', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    pastTournaments: [{ code: 'CODE1', historyId: 'hist1', label: 'Already published', archived: true, visibility: 'public', snapshot: { table: [], playerStats: [] } }],
+  };
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [{ id:'hist1', numTeams:2, legs:1, teamNames:['Red','Blue'], table:[], playerStats:[], label:'Already published' }] };
+  `);
+  await window.publishAllArchivedTournaments();
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  assert.strictEqual(dbStore['hostProfiles/hostUid'].pastTournaments.length, 1, 'must not create a duplicate entry');
+  assert.ok(window.__alerts.some(m=>m.includes('already visible')), 'should tell the organizer there was nothing left to publish');
+});

@@ -3992,6 +3992,42 @@ async function publishArchivedTournamentNow(historyId){
     alert('Could not publish right now: '+(e.message||e));
   }
 }
+// Bulk version of publishArchivedTournamentNow() -- backfills EVERY saved tournament that
+// hasn't reached followers yet in one batched write, instead of tapping "Followers: change
+// visibility" on each Archive entry individually. Covers tournaments saved before local saves
+// started auto-publishing automatically (see publishArchivedTournamentToFollowers()), or ones
+// saved while signed out. Entries already published (at whatever visibility they're currently
+// set to) are left completely untouched -- this only ever ADDS missing entries.
+async function publishAllArchivedTournaments(){
+  if(!currentUser){alert('Sign in first.');return;}
+  const history=state.tournamentHistory||[];
+  if(!history.length){alert('Nothing saved to the Archive yet.');return;}
+  try{
+    const hCode=await ensureHostCode();
+    if(!hCode){alert('Could not set up your host profile right now.');return;}
+    const ref=hostProfileDocRef(currentUser.uid);
+    const profSnap=await ref.get();
+    const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
+    const alreadyPublished=new Set(priorPast.filter(t=>t.historyId).map(t=>t.historyId));
+    const missing=history.filter(t=>!alreadyPublished.has(t.id));
+    if(!missing.length){alert('Every saved tournament is already visible to your followers.');return;}
+    const activeCode=getActiveSharedCode()||'';
+    const newEntries=missing.map(t=>({
+      code:activeCode,historyId:t.id,label:t.label,startedAt:t.savedAt||Date.now(),dateStr:t.date||'',
+      visibility:'public',archived:true,
+      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats}
+    }));
+    const pastTournaments=[...newEntries,...priorPast].slice(0,40);
+    await ref.set({pastTournaments},{merge:true});
+    missing.forEach(t=>{t.visibility='public';});
+    saveState();
+    renderArchive();
+    alert('Done -- '+missing.length+' tournament'+(missing.length===1?'':'s')+' published to your followers.');
+  }catch(e){
+    console.error('Could not publish all tournaments to followers:',e);
+    alert('Could not publish right now: '+(e.message||e));
+  }
+}
 // Lets the organizer flip an already-saved Archive entry's visibility after the fact -- e.g.
 // "this tournament was shared as private, but I want followers to be able to view it now without
 // asking my approval". Works purely against hostProfiles (never touches shared/{code}), so it
@@ -7493,6 +7529,10 @@ function renderArchive(){
   </div>`;
   const history=(state.tournamentHistory||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
   html+='<div class="section-header">Saved Tournaments</div>';
+  // Tournaments saved before newer saves started auto-publishing to followers (or saved while
+  // signed out) can end up missing from a follower's profile -- this fixes all of them in one
+  // batch instead of tapping "Followers: change visibility" on each entry individually.
+  if(history.length&&currentUser)html+='<button class="theme-btn" style="width:100%;margin-bottom:10px" onclick="publishAllArchivedTournaments()">👥 Publish all to followers</button>';
   html+=history.length?history.map(archiveEntryHtml).join(''):'<div class="empty-msg">No tournaments saved yet</div>';
   c.innerHTML=html;
 }
