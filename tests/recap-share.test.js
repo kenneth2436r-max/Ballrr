@@ -166,3 +166,22 @@ test('tournamentRecapKoLines keeps only non-League stage results, capped at 5', 
   assert.strictEqual(r.empty.length, 0);
   assert.strictEqual(r.missing.length, 0, 'a missing matches array should not throw');
 });
+
+// Regression coverage for: a tournament saved to history BEFORE the champion/matches fields
+// existed has neither -- without a fallback, its recap card would just never show a champion
+// banner again, forever. For a PURE LEAGUE save (no matches array at all -- a hybrid/knockout
+// save always gets one, even an old one re-saved after this update) the table leader IS the
+// champion by definition, so this can be safely filled in after the fact.
+test('tournamentRecapEffectiveChampion fills in the table leader for an old pure-league save with no champion on record, but never guesses for a knockout/hybrid save', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.alreadyKnown = tournamentRecapEffectiveChampion('Red FC', [{name:'Blue FC',p:3,pts:9}], []);
+    window.__results.legacyLeague = tournamentRecapEffectiveChampion(null, [{name:'Red FC',p:3,pts:9},{name:'Blue FC',p:3,pts:3}], undefined);
+    window.__results.legacyNothingPlayed = tournamentRecapEffectiveChampion(null, [{name:'Red FC',p:0,pts:0}], []);
+    window.__results.legacyKnockout = tournamentRecapEffectiveChampion(null, [{name:'Red FC',p:0,pts:0},{name:'Blue FC',p:0,pts:0}], [{stage:'Final',teamA:'Red FC',teamB:'Blue FC'}]);
+  `);
+  assert.strictEqual(r.alreadyKnown, 'Red FC', 'a real recorded champion should never be overridden');
+  assert.strictEqual(r.legacyLeague, 'Red FC', 'the table leader should fill in for an old league-only save');
+  assert.strictEqual(r.legacyNothingPlayed, null, 'nothing played yet should still be null, not a false champion');
+  assert.strictEqual(r.legacyKnockout, null, 'a save that DOES have knockout match data (even without a recorded champion) should never guess from the table alone');
+});

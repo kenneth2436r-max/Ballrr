@@ -148,3 +148,55 @@ test('toggleLiveAnnounced does nothing for a non-owner (would fail Firestore rul
   await window.__testDone;
   assert.strictEqual(dbStore['hostProfiles/hostUid'].liveAnnounced, undefined, 'a non-owner should never be able to flip the host\'s own flag');
 });
+
+// The organizer's own confirmation, on their OWN Profile tab, that their tournament is currently
+// showing as live to followers -- liveNowBannerHtml()/previewHostProfile() only ever cover a
+// FOLLOWER looking at someone else, so without this an organizer had no way to see their own
+// live state reflected anywhere except by re-opening Settings and checking the toggle button.
+test('startMyFollowersListener populates the organizer\'s own "You\'re live" banner once liveAnnounced is on', () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan', followers: [], followerNames: {},
+    latestCode: 'LIVE1', latestVisibility: 'public', latestLabel: 'Friday 5-a-side', latestStartedAt: Date.now(),
+    liveAnnounced: true,
+  };
+  const { window } = freshWindow({ dbStore, extraHtml: '<div id="my-live-banner"></div><div id="profile-stats-bar"></div>' });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [], careerSnapshotSaved: true };
+    startMyFollowersListener();
+  `);
+  const html = window.document.getElementById('my-live-banner').innerHTML;
+  assert.ok(html.includes("You're live"));
+  assert.ok(html.includes('Friday 5-a-side'));
+  assert.ok(!html.includes('private'));
+});
+
+test('the organizer\'s own live banner stays empty with a share code but no announcement, and clears again once liveAnnounced is turned off', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan', followers: [], followerNames: {},
+    latestCode: 'LIVE1', latestVisibility: 'public', latestLabel: 'Draft in progress', latestStartedAt: Date.now(),
+  };
+  const { window } = freshWindow({ dbStore, extraHtml: '<div id="my-live-banner"></div><div id="profile-stats-bar"></div>' });
+  // Everything (initial no-announcement check, then toggling on and off) is chained inside ONE
+  // eval() call -- a second, separate eval() call would see a fresh top-level `myLiveAnnounced`/
+  // `myLatestCode`, reset to their APP_SRC initial values, per the harness's documented quirk.
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [], careerSnapshotSaved: true };
+    window.__testDone = (async () => {
+      startMyFollowersListener();
+      window.__results.beforeAnnounce = document.getElementById('my-live-banner').innerHTML;
+      await hostProfileDocRef('hostUid').set({ liveAnnounced:true }, { merge:true });
+      window.__results.afterOn = document.getElementById('my-live-banner').innerHTML;
+      await hostProfileDocRef('hostUid').set({ liveAnnounced:false }, { merge:true });
+      window.__results.afterOff = document.getElementById('my-live-banner').innerHTML;
+    })();
+  `);
+  await window.__testDone;
+  const r = window.__results;
+  assert.strictEqual(r.beforeAnnounce, '', 'creating a share code alone should not show the organizer their own live banner either');
+  assert.ok(r.afterOn.includes("You're live"));
+  assert.strictEqual(r.afterOff, '', 'turning liveAnnounced back off should clear the organizer\'s own banner too');
+});

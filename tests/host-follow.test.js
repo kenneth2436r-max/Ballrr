@@ -82,6 +82,49 @@ test('starting a PRIVATE tournament still updates the host profile, just marked 
   assert.strictEqual(dbStore['shared/' + dbStore['hostProfiles/hostUid'].latestCode].visibility, 'private');
 });
 
+// Regression coverage for: sharing a brand new tournament used to always require a SEPARATE
+// second trip to Settings to tap "Go live for followers" (toggleLiveAnnounced()) before existing
+// followers could see it -- repetitive for a host who already has followers and shares often.
+// startSharingTournament()'s new 3rd `andGoLive` param collapses that into one action; the
+// existing "Share (open)"/"Share (approval)" buttons still call it with only 2 args, so they're
+// unaffected and still default to NOT live-announcing right away.
+test('startSharingTournament(andGoLive=true) shares AND announces live in one step, skipping the separate toggle', async () => {
+  const dbStore = {};
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { teamNames:['Red','Blue'] };
+    startSharingTournament(false, true, true);
+  `);
+  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+  assert.strictEqual(dbStore['hostProfiles/hostUid'].liveAnnounced, true, 'andGoLive should skip straight to announced-live, no separate toggle needed');
+});
+
+test('startSharingTournament without andGoLive still defaults to NOT live-announced (existing Share buttons are unaffected)', async () => {
+  const dbStore = {};
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { teamNames:['Red','Blue'] };
+    startSharingTournament(false, true);
+  `);
+  for(let i = 0; i < 10; i++) await new Promise(r => setTimeout(r, 0));
+  assert.strictEqual(dbStore['hostProfiles/hostUid'].liveAnnounced, false);
+});
+
+test('renderSharedSection offers a one-tap "Go live for followers" button before any tournament has been shared yet', () => {
+  const { window } = freshWindow({ extraHtml: '<div id="shared-container"></div>' });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { mode:'friendly' };
+    sharedMeta = null;
+    renderSharedSection();
+  `);
+  const html = window.document.getElementById('shared-container').innerHTML;
+  assert.ok(html.includes('Go live for followers'));
+  assert.ok(html.includes('startSharingTournament(false,document.getElementById(\'shared-visibility-public\').checked,true)'), 'the one-tap button should pass andGoLive=true');
+});
+
 test('a follower\'s listener detects a newly-live PUBLIC tournament: banner + notification fire, tapping it grants instant view access', async () => {
   const dbStore = {};
   dbStore['hostProfiles/hostUid'] = { hostName: 'Aaryan', hostCode: 'ABCDEF', followers: ['followerUid'], followerNames: { followerUid: 'Fan' } };

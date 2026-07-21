@@ -755,6 +755,7 @@ select option{background:var(--input-bg);color:var(--text)}
 
 <!-- PROFILE (Instagram-style: stats bar + tournament grid, with a pill switch down to Career) -->
 <div id="tab-profile" class="section">
+  <div id="my-live-banner"></div>
   <div id="profile-stats-bar" class="profile-stats-bar"></div>
   <div class="profile-pills">
     <button class="profile-pill active" id="profile-pill-grid" onclick="switchProfilePill('grid')">🗂 Grid</button>
@@ -1278,6 +1279,10 @@ let myHostCode=null; // this device's own signed-in user's host code, cached aft
 let myFollowersList=[]; // [{uid,name}] -- this device's own followers, kept live via startMyFollowersListener()
 let myFollowersUnsub=null;
 let myLiveAnnounced=false; // this device's own liveAnnounced flag, kept live via startMyFollowersListener() -- drives the "Go live"/"Live for followers" toggle button in Settings
+// This device's own latestCode/latestVisibility/latestLabel, kept live via the same listener --
+// needed so the Profile tab can show a "You're live" banner to the organizer themselves (not
+// just followers via liveNowBannerHtml()), confirming the toggle in Settings actually took.
+let myLatestCode=null,myLatestVisibility=null,myLatestLabel=null;
 function getFollowedHost(){
   try{
     const raw=localStorage.getItem(HOST_FOLLOW_KEY);
@@ -1346,15 +1351,31 @@ function startMyFollowersListener(){
   if(myFollowersUnsub){myFollowersUnsub();myFollowersUnsub=null;}
   if(!currentUser)return;
   myFollowersUnsub=hostProfileDocRef(currentUser.uid).onSnapshot(snap=>{
-    if(!snap.exists){myFollowersList=[];myLiveAnnounced=false;renderProfileStats();renderSharedSection();return;}
+    if(!snap.exists){myFollowersList=[];myLiveAnnounced=false;myLatestCode=null;myLatestVisibility=null;myLatestLabel=null;renderProfileStats();renderMyLiveBanner();renderSharedSection();return;}
     const d=snap.data();
     const followers=d.followers||[];
     const names=d.followerNames||{};
     myFollowersList=followers.map(uid=>({uid,name:names[uid]||'Someone'}));
     myLiveAnnounced=!!d.liveAnnounced;
+    myLatestCode=d.latestCode||null;
+    myLatestVisibility=d.latestVisibility||null;
+    myLatestLabel=d.latestLabel||null;
     renderProfileStats();
+    renderMyLiveBanner();
     renderSharedSection();
   },e=>console.error('My-followers listener failed:',e));
+}
+// The organizer's own "You're live" confirmation on their Profile tab -- purely informational
+// (no follow/join action makes sense here, it's their own tournament), just enough to confirm
+// the Settings toggle actually took and remind them where to turn it back off.
+function renderMyLiveBanner(){
+  const el=document.getElementById('my-live-banner');
+  if(!el)return;
+  if(!myLiveAnnounced||!myLatestCode){el.innerHTML='';return;}
+  el.innerHTML=`<div class="shared-pending-banner" style="background:rgba(46,204,113,0.15);border-color:rgba(46,204,113,0.45);margin-bottom:10px">
+    <div style="font-weight:700">🔴 You're live${myLatestVisibility==='private'?' (private)':''}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${esc(myLatestLabel||'Your tournament')} is showing as live to your followers right now. Manage this from Settings → Shared Tournament.</div>
+  </div>`;
 }
 
 function isNativeApp(){
@@ -1829,7 +1850,13 @@ function genShareCode(){
   return s;
 }
 
-function startSharingTournament(requireApproval,isPublic){
+// andGoLive: skips the separate manual "Go live for followers" toggle step (toggleLiveAnnounced())
+// -- lets the "🔴 Go live for followers" button in Settings share AND announce in one tap, since
+// a host who already has followers shouldn't need two separate actions every single tournament.
+// Sharing itself (a fresh code + its own Firestore doc) still happens every time regardless --
+// that part can't be skipped, a tournament's live data literally isn't stored anywhere a follower
+// could read it until this runs, no matter how long they've already been following this host.
+function startSharingTournament(requireApproval,isPublic,andGoLive){
   if(!currentUser){alert('Sign in first to share a tournament.');return;}
   if(getActiveSharedCode()){alert('You are already in a shared tournament. Leave it first.');return;}
   const visibility=isPublic?'public':'private';
@@ -1877,13 +1904,15 @@ function startSharingTournament(requireApproval,isPublic){
             latestVisibility:visibility,
             latestStartedAt:startedAt,
             latestLabel:label,
-            // Reset here (not left over true from a PREVIOUS tournament) -- the "Live now"
-            // banner/grid tile (liveAnnounced, toggled explicitly via toggleLiveAnnounced()) is
-            // deliberately NOT turned on automatically just by creating a share code, since that
-            // can happen well before there's anything worth a follower watching (before teams
-            // are even drafted). The existing one-time "just went live" push notification below
-            // still fires immediately, unaffected -- this only gates the persistent banner/tile.
-            liveAnnounced:false,
+            // Normally reset here (not left over true from a PREVIOUS tournament) -- the "Live
+            // now" banner/grid tile (liveAnnounced, toggled via toggleLiveAnnounced() or set
+            // directly here when andGoLive is passed) is deliberately NOT turned on automatically
+            // just by creating a share code, since that can happen well before there's anything
+            // worth a follower watching (before teams are even drafted) -- UNLESS the caller
+            // explicitly asked to skip that separate step (the "Go live for followers" button).
+            // The existing one-time "just went live" push notification below still fires
+            // immediately either way -- this only gates the persistent banner/tile.
+            liveAnnounced:!!andGoLive,
             pastTournaments
           },{merge:true});
         }
@@ -5085,7 +5114,21 @@ function tournamentRecapShowTable(table){
 function tournamentRecapKoLines(matches){
   return(matches||[]).filter(m=>m&&m.stage&&m.stage!=='League').slice(0,5);
 }
+// Tournaments saved to history BEFORE the champion/matches fields existed have neither -- there's
+// no knockout data left to recompute a real champion from for those, but for a PURE LEAGUE
+// tournament (no matches array at all, since a hybrid/knockout save would have one) the table
+// leader IS the champion by definition, so this fills in a real, correct answer for old saves
+// instead of just always showing nothing. Only used when the snapshot has no `matches` at all
+// (a knockout/hybrid tournament always gets one, even an old one re-saved after this update) --
+// deliberately conservative so it never guesses wrong for a format the table alone can't decide.
+function tournamentRecapEffectiveChampion(champion,table,matches){
+  if(champion)return champion;
+  if(matches&&matches.length)return null;
+  const t=table||[];
+  return(t.length&&t[0]&&t[0].p>0)?t[0].name:null;
+}
 function drawTournamentRecapCanvas(label,dateStr,table,playerStats,champion,matches){
+  champion=tournamentRecapEffectiveChampion(champion,table,matches);
   const showTable=tournamentRecapShowTable(table);
   const rows=showTable?(table||[]).slice(0,6):[];
   const koLines=tournamentRecapKoLines(matches);
@@ -8565,6 +8608,7 @@ function renderArchive(){
 // unchanged via its optional targetId param below). Entirely additive: the classic Archive and
 // Career tabs, still reachable from the sidebar, are untouched.
 function renderProfile(){
+  renderMyLiveBanner();
   renderProfileStats();
   renderProfileGrid();
   renderCareer('profile-career-container');
@@ -10041,6 +10085,8 @@ function renderSharedSection(){
           <input type="checkbox" id="shared-visibility-public" checked> \ud83d\udce2 Public (notify your followers when this goes live)
         </label>
       </div>
+      <button class="theme-btn" style="width:100%;margin-bottom:6px;background:#e05252;color:#fff" onclick="startSharingTournament(false,document.getElementById('shared-visibility-public').checked,true)">\ud83d\udd34 Go live for followers</button>
+      <p style="font-size:11px;color:var(--text-faint);margin-bottom:10px">One tap: shares this tournament AND immediately shows it as live to everyone already following you (no separate toggle step needed). Use "Share (open/approval)" below instead if you just want to edit together with friends without announcing it yet.</p>
       <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">Public: anyone following you gets notified and can view it immediately. Private: they can still see it went live, but need your approval before they can view anything.</p>
       <div style="display:flex;gap:8px;margin-bottom:6px">
         <button class="theme-btn" style="flex:1" onclick="startSharingTournament(false,document.getElementById('shared-visibility-public').checked)">\ud83d\udd13 Share (open)</button>
