@@ -5114,16 +5114,20 @@ function tournamentRecapShowTable(table){
 function tournamentRecapKoLines(matches){
   return(matches||[]).filter(m=>m&&m.stage&&m.stage!=='League').slice(0,5);
 }
-// Tournaments saved to history BEFORE the champion/matches fields existed have neither -- there's
-// no knockout data left to recompute a real champion from for those, but for a PURE LEAGUE
-// tournament (no matches array at all, since a hybrid/knockout save would have one) the table
-// leader IS the champion by definition, so this fills in a real, correct answer for old saves
-// instead of just always showing nothing. Only used when the snapshot has no `matches` at all
-// (a knockout/hybrid tournament always gets one, even an old one re-saved after this update) --
-// deliberately conservative so it never guesses wrong for a format the table alone can't decide.
+// Tournaments saved to history BEFORE the champion/matches fields existed have neither. The
+// `matches` array itself only exists AT ALL on a save made after that field was added -- so if
+// it's present (even as an empty/league-only array), we know for certain, from the save itself,
+// whether a knockout stage happened, and the table leader is a safe stand-in exactly when no
+// entry in it is knockout-stage (stage!=='League'). But a snapshot with NO `matches` key
+// whatsoever predates the field entirely, and there is NO way to tell from what's left (the table
+// alone) whether that tournament secretly had a knockout stage -- a round-robin group leader who
+// then lost their semifinal is a real, common case, not an edge case. Guessing there would show a
+// confidently WRONG champion, which is worse than showing none, so this only ever fills in an
+// answer when the save itself proves there was nothing but league play.
 function tournamentRecapEffectiveChampion(champion,table,matches){
   if(champion)return champion;
-  if(matches&&matches.length)return null;
+  if(!matches)return null;
+  if(matches.some(m=>m&&m.stage&&m.stage!=='League'))return null;
   const t=table||[];
   return(t.length&&t[0]&&t[0].p>0)?t[0].name:null;
 }
