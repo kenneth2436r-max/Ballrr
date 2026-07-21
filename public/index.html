@@ -950,7 +950,7 @@ select option{background:var(--input-bg);color:var(--text)}
     <button class="tab bottom-nav-btn active" onclick="showTab('home',this)"><span class="bottom-nav-icon">🏠</span>Home</button>
     <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('search',this)"><span class="bottom-nav-icon">🔍</span>Search</button>
     <button class="bottom-nav-btn create" onclick="openCreateMenu()"><span class="bottom-nav-icon">➕</span>Create</button>
-    <button class="tab bottom-nav-btn" onclick="showTab('reels',this)"><span class="bottom-nav-icon">🎬</span>Reels</button>
+    <button class="tab bottom-nav-btn" onclick="showTab('reels',this)"><span class="bottom-nav-icon">📰</span>Match Feed</button>
     <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('profile',this)"><span class="bottom-nav-icon">👤</span>Profile</button>
   </div>
 </nav>
@@ -4179,12 +4179,26 @@ function snapshotCurrentTournament(){
   // stage is the label's prefix before " · " (e.g. "League", "Semifinal", "Final", "Qualifier",
   // "Grand Final") -- lets the recap card (drawTournamentRecapCanvas()) call out the knockout
   // stage's key results specifically, not just dump every match played.
-  const matches=allPlayedMatchesWithTeams().map(({teamIds,m,label})=>({
-    teamA:state.teamNames[teamIds[0]],teamB:state.teamNames[teamIds[1]],
-    scoreA:m.g[0],scoreB:m.g[1],
-    stage:(label||'').split(' · ')[0]||'League',
-    scorers:(m.scorers||[]).map(s=>({name:(s.name||'').trim(),side:s.team===teamIds[0]?'A':'B'})).filter(s=>s.name)
-  }));
+  // lineup/formation are captured too (not just scorers) so a published/archived tournament can
+  // still show a read-only pitch view per match later (see savedLineupPitchHtml()) -- the live
+  // Lineups tab's own renderLineupPitch()/computeMatchPlayerRatings() can't be reused as-is there
+  // since they read from live `state` and support drag-and-drop editing neither of which applies
+  // to a static, already-finished snapshot.
+  const matches=allPlayedMatchesWithTeams().map(({teamIds,m,label})=>{
+    const ratingsByTeam=computeMatchPlayerRatings(m,teamIds);
+    const buildLineup=teamId=>getMatchSquad(m,teamId).map(name=>{
+      const info=(ratingsByTeam[teamId]&&ratingsByTeam[teamId][name])||{};
+      return{name,pos:effectivePlayerPosition(m,name),rating:info.rating!=null?Math.round(info.rating*10)/10:null,goals:info.goals||0,assists:info.assists||0};
+    });
+    return{
+      teamA:state.teamNames[teamIds[0]],teamB:state.teamNames[teamIds[1]],
+      scoreA:m.g[0],scoreB:m.g[1],
+      stage:(label||'').split(' · ')[0]||'League',
+      scorers:(m.scorers||[]).map(s=>({name:(s.name||'').trim(),side:s.team===teamIds[0]?'A':'B'})).filter(s=>s.name),
+      formation:FORMATIONS[m.formation]?m.formation:'standard',
+      lineup:{A:buildLineup(teamIds[0]),B:buildLineup(teamIds[1])}
+    };
+  });
   // The overall tournament winner -- see computeTournamentChampion()'s own comment for why this
   // can't be read off the table alone for anything with a knockout stage.
   const champion=computeTournamentChampion();
@@ -4553,6 +4567,92 @@ function teamHalfHtml(teamId,matchObj,ratings,reversed,formationKey){
     }
   });
   return`<div class="lp-half">${rowsHtml.join('')}</div>`;
+}
+
+// Read-only pitch view for a SAVED tournament's per-match lineup -- used by both a follower
+// viewing a host's published profile (viewArchivedTournamentSnapshot()) and, later, the
+// organizer's own local archive if that's ever wired up too. Mirrors the live Lineups tab's
+// teamHalfHtml()/playerCardHtml() layout (position rows, formation spread) but works entirely
+// off a snapshot match entry's already-computed lineup/formation data (see
+// snapshotCurrentTournament()'s `matches` field) instead of live `state`, and has no
+// drag-and-drop, tap-to-move, or rating-override handlers -- nothing to edit on a finished,
+// already-published tournament.
+function savedLineupPlayerCardHtml(p){
+  const badge=p.rating!=null?`<span class="lp-rating" style="background:${ratingColor(p.rating)};color:${ratingTextColor(p.rating)}">${p.rating.toFixed(1)}</span>`:'';
+  const bits=[];
+  if(p.goals)bits.push('⚽'+p.goals);
+  if(p.assists)bits.push('🅰'+p.assists);
+  return`<div class="lp-player">
+    <div class="lp-avatar">${esc(initials(p.name))}${badge}</div>
+    <div class="lp-name">${esc(p.name)}</div>
+    ${bits.length?`<div class="lp-sub">${bits.join(' ')}</div>`:''}
+  </div>`;
+}
+function savedLineupRowHtml(pos,players,extraClass){
+  const cards=players.map(savedLineupPlayerCardHtml).join('');
+  return`<div class="lp-row ${extraClass||''}">${cards||`<span class="lp-slot-hint">${pos}</span>`}</div>`;
+}
+function savedLineupHalfHtml(players,reversed,formationKey){
+  const byPos={GK:[],DEF:[],MID:[],FWD:[]};
+  (players||[]).forEach(p=>(byPos[p.pos]||byPos.MID).push(p));
+  const f=FORMATIONS[formationKey]||FORMATIONS.standard;
+  const order=reversed?['FWD','MID','DEF','GK']:['GK','DEF','MID','FWD'];
+  const rowsHtml=[];
+  order.forEach(pos=>{
+    if(pos==='MID'&&f.splitMid&&byPos.MID.length>1){
+      const half=Math.ceil(byPos.MID.length/2);
+      const holding=byPos.MID.slice(0,half),advanced=byPos.MID.slice(half);
+      const first=reversed?advanced:holding, second=reversed?holding:advanced;
+      rowsHtml.push(savedLineupRowHtml('MID',first,''));
+      rowsHtml.push(savedLineupRowHtml('MID',second,''));
+    }else if(pos==='FWD'&&f.wideFwd){
+      rowsHtml.push(savedLineupRowHtml('FWD',byPos.FWD,'lp-row-wide'));
+    }else{
+      rowsHtml.push(savedLineupRowHtml(pos,byPos[pos],''));
+    }
+  });
+  return`<div class="lp-half">${rowsHtml.join('')}</div>`;
+}
+// Full read-only pitch for one saved match entry. Returns '' for a match with no recorded squad
+// (older tournaments saved before this field existed), so callers can skip the section entirely.
+function savedLineupPitchHtml(match){
+  if(!match||!match.lineup||(!match.lineup.A.length&&!match.lineup.B.length))return'';
+  return`<div class="lineup-scoreline">
+      <span>${esc(match.teamA)}</span>
+      <span class="result-score">${match.scoreA} – ${match.scoreB}</span>
+      <span>${esc(match.teamB)}</span>
+    </div>
+    <div class="lineup-pitch">
+      <span class="lp-team-label top">${esc(match.teamA)}</span>
+      <span class="lp-team-label bottom">${esc(match.teamB)}</span>
+      <div class="lp-box top"></div>
+      <div class="lp-box bottom"></div>
+      <div class="lp-halfway"></div>
+      <div class="lp-circle"></div>
+      ${savedLineupHalfHtml(match.lineup.A,false,match.formation)}
+      ${savedLineupHalfHtml(match.lineup.B,true,match.formation)}
+    </div>`;
+}
+// Which match's lineup is currently picked in the saved-tournament selector (viewArchivedTournamentSnapshot).
+let savedLineupSelIdx=null;
+function savedLineupSectionHtml(matches){
+  const withLineups=(matches||[]).filter(m=>m.lineup&&(m.lineup.A.length||m.lineup.B.length));
+  if(!withLineups.length)return'';
+  if(savedLineupSelIdx==null||savedLineupSelIdx>=withLineups.length)savedLineupSelIdx=withLineups.length-1;
+  const opts=withLineups.map((m,i)=>{
+    const label=(m.stage&&m.stage!=='League'?m.stage+' · ':'')+m.teamA+' '+m.scoreA+'–'+m.scoreB+' '+m.teamB;
+    return`<option value="${i}" ${i===savedLineupSelIdx?'selected':''}>${esc(label)}</option>`;
+  }).join('');
+  return`<div class="edit-title">Lineups &amp; Match Ratings</div>
+    <select id="saved-lineup-select" style="width:100%;padding:9px 10px;border:1px solid var(--border-input);border-radius:8px;background:var(--input-bg);color:var(--text);font-size:13px;margin-bottom:10px" onchange="savedLineupSelIdx=parseInt(this.value);renderSavedLineupPitch()">${opts}</select>
+    <div id="saved-lineup-pitch">${savedLineupPitchHtml(withLineups[savedLineupSelIdx])}</div>`;
+}
+function renderSavedLineupPitch(){
+  const entry=lastViewedRecapEntry;
+  const matches=((entry&&entry.snapshot&&entry.snapshot.matches)||[]).filter(m=>m.lineup&&(m.lineup.A.length||m.lineup.B.length));
+  const el=document.getElementById('saved-lineup-pitch');
+  if(!el||!matches[savedLineupSelIdx])return;
+  el.innerHTML=savedLineupPitchHtml(matches[savedLineupSelIdx]);
 }
 
 // name+team of whichever player currently has their detailed match-stats form expanded
@@ -9849,6 +9949,7 @@ async function toggleReaction(hostUid,historyId){
 function viewArchivedTournamentSnapshot(entry){
   const el=document.getElementById('recap-card-content');
   lastViewedRecapEntry=entry;
+  savedLineupSelIdx=null; // reset the picked match whenever a different tournament is opened
   if(!entry||!entry.snapshot){
     el.innerHTML=`<div class="recap-title">\ud83d\udcda Tournament</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">This tournament's details aren't available.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
     document.getElementById('recap-modal').style.display='flex';
@@ -9873,6 +9974,7 @@ function viewArchivedTournamentSnapshot(entry){
     ${tableRows?`<div class="table-wrap" style="margin-bottom:10px"><table><thead><tr><th>#</th><th>Team</th><th>P</th><th>W</th><th>D</th><th>L</th><th>GF</th><th>GA</th><th>GD</th><th>Pts</th></tr></thead><tbody>${tableRows}</tbody></table></div>`:''}
     ${ratingRows?`<div class="edit-title" style="margin-top:0">Top Performers</div>${ratingRows}`:''}
     ${synergyRows?`<div class="section-header">Top Synergy</div>${synergyRows}`:''}
+    ${savedLineupSectionHtml(s.matches)}
     <div id="recap-reaction"></div>
     <div class="recap-actions"><button class="pc-btn pc-btn-share" onclick="shareHostTournamentRecap()">📤 Share</button><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
   document.getElementById('recap-modal').style.display='flex';
@@ -10537,7 +10639,7 @@ function updatePendingApprovalUI(){
 // 'knockout' is kept as an alias for 'matches' -- the Knockout tab was merged into Matches, but
 // a few other places (cue cards, the Home screen's shortcut cards) may still reference the old
 // tab name by habit, and this keeps the tab pill label sensible if so instead of showing "knockout".
-const TAB_LABELS={home:'🏠 Home',activity:'🔔 Activity',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',reels:'🎬 Reels',search:'🔍 Search',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
+const TAB_LABELS={home:'🏠 Home',activity:'🔔 Activity',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',reels:'📰 Match Feed',search:'🔍 Search',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
 /* ---------- ANDROID HARDWARE/GESTURE BACK BUTTON ----------
  * Capacitor's default behavior for a WebView with no browser navigation history is to just
  * exit the app on back -- since this whole app is a single page with tabs swapped via JS
