@@ -19,15 +19,16 @@ test('shareMyTournamentRecap draws the recap canvas from the matching saved tour
   const r = runInOneEval(window, `
     window.__drawCalls = [];
     window.__shareCalls = [];
-    drawTournamentRecapCanvas = function(label, dateStr, table, playerStats){
-      window.__drawCalls.push({ label, dateStr, table, playerStats });
+    drawTournamentRecapCanvas = function(label, dateStr, table, playerStats, champion, matches){
+      window.__drawCalls.push({ label, dateStr, table, playerStats, champion, matches });
       return { fake: 'canvas' };
     };
     shareCanvasAsImage = function(canvas, filename, title, text){
       window.__shareCalls.push({ canvas, filename, title, text });
     };
     state = { tournamentHistory: [
-      { id:'hist1', label:'Summer Cup', date:'2026-07-01', table:[{name:'Red',pts:9}], playerStats:[{name:'Alex',goals:3,avg:8.1}] },
+      { id:'hist1', label:'Summer Cup', date:'2026-07-01', table:[{name:'Red',pts:9}], playerStats:[{name:'Alex',goals:3,avg:8.1}],
+        champion:'Red FC', matches:[{teamA:'Red FC',teamB:'Blue FC',scoreA:3,scoreB:1,stage:'Final',scorers:[]}] },
     ] };
     shareMyTournamentRecap('hist1');
     window.__results.draws = window.__drawCalls;
@@ -38,6 +39,8 @@ test('shareMyTournamentRecap draws the recap canvas from the matching saved tour
   assert.strictEqual(r.draws[0].dateStr, '2026-07-01');
   assert.strictEqual(r.draws[0].table[0].name, 'Red');
   assert.strictEqual(r.draws[0].playerStats[0].name, 'Alex');
+  assert.strictEqual(r.draws[0].champion, 'Red FC', 'the saved champion should be passed through to the canvas');
+  assert.strictEqual(r.draws[0].matches[0].stage, 'Final', 'the saved per-match knockout data should be passed through to the canvas');
   assert.strictEqual(r.shares.length, 1, 'the drawn canvas should be handed to the share plumbing exactly once');
   assert.ok(r.shares[0].text.includes('Summer Cup'), 'the share text should reference the tournament');
 });
@@ -73,8 +76,8 @@ test('viewArchivedTournamentSnapshot renders a Share button, and shareHostTourna
   const r = runInOneEval(window, `
     window.__drawCalls = [];
     window.__shareCalls = [];
-    drawTournamentRecapCanvas = function(label, dateStr, table, playerStats){
-      window.__drawCalls.push({ label, dateStr, table, playerStats });
+    drawTournamentRecapCanvas = function(label, dateStr, table, playerStats, champion, matches){
+      window.__drawCalls.push({ label, dateStr, table, playerStats, champion, matches });
       return { fake: 'canvas' };
     };
     shareCanvasAsImage = function(canvas, filename, title, text){
@@ -82,7 +85,8 @@ test('viewArchivedTournamentSnapshot renders a Share button, and shareHostTourna
     };
     lastViewedHostUid = 'hostUid';
     const entry = { label:'Winter Cup', dateStr:'2026-01-10', historyId:'hist2', visibility:'public',
-      snapshot: { table:[{name:'Blue',pts:6}], playerStats:[{name:'Sam',goals:2,avg:7.4}] } };
+      snapshot: { table:[{name:'Blue',pts:6}], playerStats:[{name:'Sam',goals:2,avg:7.4}],
+        champion:'Blue FC', matches:[{teamA:'Blue FC',teamB:'Green FC',scoreA:2,scoreB:0,stage:'Semifinal',scorers:[]}] } };
     viewArchivedTournamentSnapshot(entry);
     window.__results.contentHtml = document.getElementById('recap-card-content').innerHTML;
     shareHostTournamentRecap();
@@ -94,6 +98,8 @@ test('viewArchivedTournamentSnapshot renders a Share button, and shareHostTourna
   assert.strictEqual(r.draws[0].label, 'Winter Cup');
   assert.strictEqual(r.draws[0].table[0].name, 'Blue');
   assert.strictEqual(r.draws[0].playerStats[0].name, 'Sam');
+  assert.strictEqual(r.draws[0].champion, 'Blue FC', 'the published champion should be passed through to the canvas');
+  assert.strictEqual(r.draws[0].matches[0].stage, 'Semifinal', 'the published per-match knockout data should be passed through to the canvas');
   assert.strictEqual(r.shares.length, 1);
   assert.ok(r.shares[0].text.includes('Winter Cup'));
 });
@@ -122,4 +128,41 @@ test('fitCanvasText returns text unchanged when it already fits, and truncates w
   assert.strictEqual(r.fits, 'Short', 'text that already fits should be returned as-is');
   assert.ok(r.truncated.endsWith('…'), 'text that overflows should end with an ellipsis');
   assert.ok(r.truncated.length < 'A Very Long Tournament Name That Overflows'.length, 'the truncated text should be shorter than the original');
+});
+
+// tournamentRecapShowTable()/tournamentRecapKoLines() are extracted out of
+// drawTournamentRecapCanvas() specifically so this logic can be tested directly -- jsdom has no
+// real <canvas> 2D context, so the canvas-drawing function itself can only ever be verified by
+// stubbing it out wholesale (the tests above).
+test('tournamentRecapShowTable is false for a pure-knockout table (every row at p:0), true once anyone has actually played a league fixture', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.allZero = tournamentRecapShowTable([{name:'Red FC',p:0,pts:0},{name:'Blue FC',p:0,pts:0}]);
+    window.__results.empty = tournamentRecapShowTable([]);
+    window.__results.played = tournamentRecapShowTable([{name:'Red FC',p:2,pts:6},{name:'Blue FC',p:2,pts:0}]);
+  `);
+  assert.strictEqual(r.allZero, false, 'an all-zero table (pure knockout tournament) should not be shown on the recap card');
+  assert.strictEqual(r.empty, false);
+  assert.strictEqual(r.played, true);
+});
+
+test('tournamentRecapKoLines keeps only non-League stage results, capped at 5', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.filtered = tournamentRecapKoLines([
+      { teamA:'A', teamB:'B', stage:'League' },
+      { teamA:'A', teamB:'C', stage:'Semifinal' },
+      { teamA:'B', teamB:'C', stage:'Final' },
+    ]);
+    window.__results.capped = tournamentRecapKoLines(
+      Array.from({length:8}, (_, i) => ({ teamA:'A', teamB:'B', stage:'Round'+i }))
+    );
+    window.__results.empty = tournamentRecapKoLines([]);
+    window.__results.missing = tournamentRecapKoLines(undefined);
+  `);
+  assert.strictEqual(r.filtered.length, 2, 'the League-stage result should be excluded');
+  assert.ok(r.filtered.every(m => m.stage !== 'League'));
+  assert.strictEqual(r.capped.length, 5, 'the list should be capped at 5 even with more knockout results than that');
+  assert.strictEqual(r.empty.length, 0);
+  assert.strictEqual(r.missing.length, 0, 'a missing matches array should not throw');
 });

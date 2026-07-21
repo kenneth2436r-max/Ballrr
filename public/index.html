@@ -1277,6 +1277,7 @@ let hostFollowNotice=null; // {code, visibility, hostName} once a followed host 
 let myHostCode=null; // this device's own signed-in user's host code, cached after first fetch/create
 let myFollowersList=[]; // [{uid,name}] -- this device's own followers, kept live via startMyFollowersListener()
 let myFollowersUnsub=null;
+let myLiveAnnounced=false; // this device's own liveAnnounced flag, kept live via startMyFollowersListener() -- drives the "Go live"/"Live for followers" toggle button in Settings
 function getFollowedHost(){
   try{
     const raw=localStorage.getItem(HOST_FOLLOW_KEY);
@@ -1345,12 +1346,14 @@ function startMyFollowersListener(){
   if(myFollowersUnsub){myFollowersUnsub();myFollowersUnsub=null;}
   if(!currentUser)return;
   myFollowersUnsub=hostProfileDocRef(currentUser.uid).onSnapshot(snap=>{
-    if(!snap.exists){myFollowersList=[];renderProfileStats();return;}
+    if(!snap.exists){myFollowersList=[];myLiveAnnounced=false;renderProfileStats();renderSharedSection();return;}
     const d=snap.data();
     const followers=d.followers||[];
     const names=d.followerNames||{};
     myFollowersList=followers.map(uid=>({uid,name:names[uid]||'Someone'}));
+    myLiveAnnounced=!!d.liveAnnounced;
     renderProfileStats();
+    renderSharedSection();
   },e=>console.error('My-followers listener failed:',e));
 }
 
@@ -1874,6 +1877,13 @@ function startSharingTournament(requireApproval,isPublic){
             latestVisibility:visibility,
             latestStartedAt:startedAt,
             latestLabel:label,
+            // Reset here (not left over true from a PREVIOUS tournament) -- the "Live now"
+            // banner/grid tile (liveAnnounced, toggled explicitly via toggleLiveAnnounced()) is
+            // deliberately NOT turned on automatically just by creating a share code, since that
+            // can happen well before there's anything worth a follower watching (before teams
+            // are even drafted). The existing one-time "just went live" push notification below
+            // still fires immediately, unaffected -- this only gates the persistent banner/tile.
+            liveAnnounced:false,
             pastTournaments
           },{merge:true});
         }
@@ -2363,8 +2373,26 @@ async function clearLatestLiveFromHostProfile(code){
     const ref=hostProfileDocRef(currentUser.uid);
     const profSnap=await ref.get();
     if(!profSnap.exists||profSnap.data().latestCode!==code)return;
-    await ref.set({latestCode:null,latestVisibility:null,latestStartedAt:0,latestLabel:null},{merge:true});
+    await ref.set({latestCode:null,latestVisibility:null,latestStartedAt:0,latestLabel:null,liveAnnounced:false},{merge:true});
   }catch(e){console.error('Could not clear latest-live pointer after disband:',e);}
+}
+// Deliberate, host-controlled "announce as live to followers" toggle -- separate from
+// latestCode/latestStartedAt (set automatically the instant a share code is created, which can
+// happen well before there's anything worth watching -- before teams are even drafted). The
+// organizer flips this on whenever THEY decide is the right moment (once teams are picked, once
+// the first match kicks off, whatever makes sense for that tournament), and it's what gates the
+// "🔴 Live now" banner (liveNowBannerHtml()) and the live tile in the follower-facing profile
+// grid. Toggling it back off doesn't affect the underlying shared tournament at all -- followers
+// who already jumped in keep watching; it just stops being advertised as "live" to new visitors.
+async function toggleLiveAnnounced(){
+  if(!currentUser||!sharedMeta||sharedMeta.ownerId!==currentUser.uid)return;
+  haptic('tap');
+  try{
+    const ref=hostProfileDocRef(currentUser.uid);
+    const snap=await ref.get();
+    const next=!(snap.exists&&snap.data().liveAnnounced);
+    await ref.set({liveAnnounced:next},{merge:true});
+  }catch(e){console.error('Could not update live status:',e);alert('Could not update: '+(e.message||e));}
 }
 
 function copyShareCode(){
@@ -3344,6 +3372,8 @@ function renderMatches(){
         <span class="score-display" id="score-${mi}-b">${liveScore[1]}</span>
         <span class="team-name-s right">${teamLabel(m[1])}</span>
       </div>
+      ${predictionHtml(mi,r)}
+      ${sharedMeta?`<div id="fan-predictions-${mi}" class="prediction-section"></div>`:''}
       ${matchTimerHtml(mi,r,compact)}
       ${matchFeedHtml(mi,r)}
       <div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:10px">Score is the total of goal scorers added below. No scorers yet = 0–0.</div>
@@ -3360,8 +3390,6 @@ function renderMatches(){
       ${r.played?`<button class="share-btn" onclick="shareMatchResult(${mi})">📷 Share result</button>`:''}
       ${(r.played&&isFriendlyMode())?`<button class="share-btn" onclick="showMatchRecap(${mi})">📝 Recap</button>`:''}
       ${(r.played&&!compact)?mediaLinksHtml(mi,r.mediaLinks):''}
-      ${predictionHtml(mi,r)}
-      ${sharedMeta?`<div id="fan-predictions-${mi}" class="prediction-section"></div>`:''}
       ${potmVoteHtml(mi,r,m)}
     </div>`;
   }).join('');
@@ -4075,6 +4103,44 @@ function computeSynergy(){
 // Distills the CURRENT tournament down to just the important, reusable parts -- final
 // standings, each player's tournament-average rating, goals/assists/clean sheets, and the top
 // synergy duos -- rather than every match's raw data, since that's what future balanced drafts
+// Reuses the exact same champion-determination logic each live bracket view already computes
+// inline (renderKnockout()'s standard-bracket branch via getRoundSlot(), renderPage3TableBracket()
+// for the 3-team playoff, resolveCustomMatch() for custom stages) rather than re-deriving it, so
+// this can never disagree with what "🏆 Champion:" already shows live. Falls back to the league
+// table leader for a pure league/round-robin format with no knockout stage at all. Added
+// alongside the recap-card champion callout -- table/playerStats alone can't say who actually
+// won a hybrid or knockout tournament, only how the league stage (if any) finished.
+function computeTournamentChampion(){
+  if(state.customKO&&state.customKO.enabled){
+    const stages=state.customKO.stages;
+    if(!stages.length)return null;
+    const lastSi=stages.length-1,lastStage=stages[lastSi];
+    if(!lastStage.matches.length)return null;
+    const res=resolveCustomMatch(lastSi,lastStage.matches.length-1);
+    return(res.decided&&res.team!=null)?state.teamNames[res.team]:null;
+  }
+  if(state.numTeams===3&&state.page3){
+    const t=calcTable();
+    if(t.length<3)return null;
+    const first=t[0].id,second=t[1].id,third=t[2].id;
+    const q=state.page3.qualifier,e=state.page3.eliminator,f=state.page3.final;
+    const qDecided=q.played&&q.g[0]!==q.g[1];
+    const qWinner=qDecided?(q.g[0]>q.g[1]?first:third):null;
+    const qLoser=qDecided?(q.g[0]>q.g[1]?third:first):null;
+    const eDecided=qDecided&&e.played&&e.g[0]!==e.g[1];
+    const eWinner=eDecided?(e.g[0]>e.g[1]?second:qLoser):null;
+    const fDecided=eDecided&&f.played&&f.g[0]!==f.g[1];
+    const champion=fDecided?(f.g[0]>f.g[1]?qWinner:eWinner):null;
+    return champion!=null?state.teamNames[champion]:null;
+  }
+  if(state.koRounds){
+    const totalRounds=bracketRounds();
+    const finalSlot=getRoundSlot(totalRounds-1,0);
+    return(finalSlot.decided&&finalSlot.team!=null)?state.teamNames[finalSlot.team]:null;
+  }
+  const t=calcTable();
+  return(t.length&&t[0].p>0)?t[0].name:null;
+}
 // and browsing by date actually need.
 function snapshotCurrentTournament(){
   const table=calcTable().map(t=>({name:t.name,p:t.p,w:t.w,d:t.d,l:t.l,gf:t.gf,ga:t.ga,gd:t.gd,pts:t.pts}));
@@ -4110,12 +4176,19 @@ function snapshotCurrentTournament(){
   // final standings and season-long totals, never the individual results that produced them.
   // Reuses allPlayedMatchesWithTeams() (already covers league + every knockout format) rather
   // than re-deriving match traversal.
-  const matches=allPlayedMatchesWithTeams().map(({teamIds,m})=>({
+  // stage is the label's prefix before " · " (e.g. "League", "Semifinal", "Final", "Qualifier",
+  // "Grand Final") -- lets the recap card (drawTournamentRecapCanvas()) call out the knockout
+  // stage's key results specifically, not just dump every match played.
+  const matches=allPlayedMatchesWithTeams().map(({teamIds,m,label})=>({
     teamA:state.teamNames[teamIds[0]],teamB:state.teamNames[teamIds[1]],
     scoreA:m.g[0],scoreB:m.g[1],
+    stage:(label||'').split(' · ')[0]||'League',
     scorers:(m.scorers||[]).map(s=>({name:(s.name||'').trim(),side:s.team===teamIds[0]?'A':'B'})).filter(s=>s.name)
   }));
-  return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy,matches};
+  // The overall tournament winner -- see computeTournamentChampion()'s own comment for why this
+  // can't be read off the table alone for anything with a knockout stage.
+  const champion=computeTournamentChampion();
+  return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy,matches,champion};
 }
 
 function saveTournamentToHistory(){
@@ -4200,7 +4273,7 @@ async function publishArchivedTournamentNow(historyId){
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
     if(priorPast.some(t=>t.historyId===historyId))return; // already published -- nothing to do
-    const trimmedSnapshot={numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[]};
+    const trimmedSnapshot={numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[],champion:entry.champion||null};
     const newEntry={code:getActiveSharedCode()||'',historyId,label:entry.label,startedAt:entry.savedAt||Date.now(),dateStr:entry.date||'',visibility:'public',archived:true,snapshot:trimmedSnapshot};
     const pastTournaments=[newEntry,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
@@ -4236,7 +4309,7 @@ async function publishAllArchivedTournaments(){
     const newEntries=missing.map(t=>({
       code:activeCode,historyId:t.id,label:t.label,startedAt:t.savedAt||Date.now(),dateStr:t.date||'',
       visibility:'public',archived:true,
-      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats,synergy:t.synergy,matches:t.matches||[]}
+      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats,synergy:t.synergy,matches:t.matches||[],champion:t.champion||null}
     }));
     const pastTournaments=[...newEntries,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
@@ -4269,7 +4342,7 @@ async function setArchivedTournamentVisibility(historyId,newVisibility){
       alert("This tournament was never shared with your followers, so there's nothing to change.");
       return;
     }
-    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[]}:null;
+    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[],champion:entry.champion||null}:null;
     const pastTournaments=priorPast.map(t=>t.historyId===historyId?{...t,visibility:newVisibility,snapshot:trimmedSnapshot}:t);
     await ref.set({pastTournaments},{merge:true});
     entry.visibility=newVisibility;
@@ -4338,7 +4411,7 @@ async function publishArchivedTournamentToFollowers(historyId,label,dateStr,snap
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
     const isPrivate=visibility==='private';
-    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats,synergy:snapshot.synergy,matches:snapshot.matches||[]}:null;
+    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats,synergy:snapshot.synergy,matches:snapshot.matches||[],champion:snapshot.champion||null}:null;
     const code=sharedMeta?sharedMeta.code:(getActiveSharedCode()||'');
     const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility,archived:true,snapshot:trimmedSnapshot};
     // Smaller cap than before (40 vs the old 60) -- each entry now carries real tournament data,
@@ -4873,9 +4946,29 @@ function fitCanvasText(ctx,text,maxWidth){
 // differ in where table/playerStats come from (state.tournamentHistory vs a published
 // snapshot), so the drawing itself is shared rather than duplicated, same as shareCanvasAsImage()
 // already is for the underlying share-sheet plumbing.
-function drawTournamentRecapCanvas(label,dateStr,table,playerStats){
-  const rows=(table||[]).slice(0,6);
-  const W=900,H=Math.max(640,260+rows.length*54+120);
+// The league "table" is meaningless for a pure-knockout tournament (every row sits at p:0,
+// since nobody played a league fixture) -- extracted as its own function (rather than inlined in
+// drawTournamentRecapCanvas below) so this decision is independently testable: jsdom has no real
+// <canvas> 2D context, so the canvas-drawing function itself can only ever be tested by stubbing
+// it out wholesale (see recap-share.test.js), which can't verify logic living inside it.
+function tournamentRecapShowTable(table){
+  return(table||[]).some(r=>r&&r.p>0);
+}
+// Knockout-stage results (Qualifier/Eliminator/Semifinal/Final/etc, tagged via matches[].stage --
+// see snapshotCurrentTournament()) worth calling out on the recap card as a compact scoreline
+// list -- the "where's the bracket" callout, capped so a long custom-KO stage list doesn't run
+// off the card. Also extracted for the same testability reason as tournamentRecapShowTable().
+function tournamentRecapKoLines(matches){
+  return(matches||[]).filter(m=>m&&m.stage&&m.stage!=='League').slice(0,5);
+}
+function drawTournamentRecapCanvas(label,dateStr,table,playerStats,champion,matches){
+  const showTable=tournamentRecapShowTable(table);
+  const rows=showTable?(table||[]).slice(0,6):[];
+  const koLines=tournamentRecapKoLines(matches);
+  const championH=champion?60:20;
+  const tableH=rows.length?(52+rows.length*54+10):0;
+  const koH=koLines.length?(26+koLines.length*26+10):0;
+  const W=900,H=Math.max(560,150+championH+tableH+koH+90);
   const canvas=document.createElement('canvas');
   canvas.width=W;canvas.height=H;
   const ctx=canvas.getContext('2d');
@@ -4893,7 +4986,17 @@ function drawTournamentRecapCanvas(label,dateStr,table,playerStats){
   ctx.font='600 14px Arial';ctx.fillStyle='#c9b8f5';
   ctx.fillText(dateStr||'',W/2,120);
 
-  let y=170;
+  let y=150;
+  if(champion){
+    ctx.fillStyle='rgba(250,199,117,0.15)';
+    ctx.fillRect(80,y-32,W-160,46);
+    ctx.font='800 22px Arial';ctx.fillStyle='#FAC775';
+    ctx.fillText(fitCanvasText(ctx,`🏆 ${champion} — Champions!`,W-140),W/2,y);
+    y+=52;
+  }else{
+    y+=20;
+  }
+
   if(rows.length){
     ctx.font='700 13px Arial';ctx.fillStyle='#c9b8f5';
     ctx.textAlign='left';ctx.fillText('#',50,y);ctx.fillText('TEAM',100,y);
@@ -4910,6 +5013,19 @@ function drawTournamentRecapCanvas(label,dateStr,table,playerStats){
       ctx.font='800 20px Arial';ctx.fillStyle='#fff';
       ctx.textAlign='right';ctx.fillText(String(row.pts),850,y);
       y+=54;
+    });
+    y+=10;
+  }
+
+  if(koLines.length){
+    ctx.textAlign='center';
+    ctx.font='700 15px Arial';ctx.fillStyle='#A78BFA';
+    ctx.fillText('KNOCKOUT RESULTS',W/2,y);
+    y+=26;
+    ctx.font='600 16px Arial';ctx.fillStyle='#fff';
+    koLines.forEach(m=>{
+      ctx.fillText(fitCanvasText(ctx,`${m.stage}: ${m.teamA} ${m.scoreA}–${m.scoreB} ${m.teamB}`,W-140),W/2,y);
+      y+=26;
     });
     y+=10;
   }
@@ -4937,7 +5053,7 @@ function shareMyTournamentRecap(id){
   haptic('tap');
   const t=(state.tournamentHistory||[]).find(x=>x.id===id);
   if(!t)return;
-  const canvas=drawTournamentRecapCanvas(t.label||(t.teamNames||[]).join(' vs '),t.date||'',t.table,t.playerStats);
+  const canvas=drawTournamentRecapCanvas(t.label||(t.teamNames||[]).join(' vs '),t.date||'',t.table,t.playerStats,t.champion||null,t.matches||[]);
   shareCanvasAsImage(canvas,'ballrr-recap.png','Tournament Recap',`${t.label||'Tournament'} — tracked on Ballrr`);
 }
 // Follower side: shares whatever host tournament is currently open in the recap modal. Reads
@@ -4950,7 +5066,7 @@ function shareHostTournamentRecap(){
   const entry=lastViewedRecapEntry;
   if(!entry||!entry.snapshot)return;
   const s=entry.snapshot;
-  const canvas=drawTournamentRecapCanvas(entry.label||'Tournament',entry.dateStr||'',s.table,s.playerStats);
+  const canvas=drawTournamentRecapCanvas(entry.label||'Tournament',entry.dateStr||'',s.table,s.playerStats,s.champion||null,s.matches||[]);
   shareCanvasAsImage(canvas,'ballrr-recap.png','Tournament Recap',`${entry.label||'Tournament'} — tracked on Ballrr`);
 }
 
@@ -5994,6 +6110,26 @@ async function consumePendingFollow(){
 // there's nothing live to jump into, this now also auto-opens the same "Past tournaments" list
 // the "Browse their past tournaments" button opens, landing the visitor directly on the host's
 // real archive instead of leaving them to find it themselves.
+// Surfaces a host's live-tournament pointer (latestCode/latestVisibility/latestLabel --
+// already fetched as part of the profile doc, previously only ever consumed silently by
+// consumePendingFollowHost()'s auto-jump, or shown as a one-time OS push notification via
+// hostFollowNotice in renderHostFollowBlock()) as a persistent, re-derivable banner right on the
+// profile itself. Unlike hostFollowNotice (cleared once seen/acted on, so it's gone again on a
+// later visit even if the host is still live), this reflects whatever's actually live right now
+// every time the profile is opened -- which is what answers "how do my followers know I'm
+// hosting right now" for someone who wasn't watching at the exact moment it started.
+function liveNowBannerHtml(d){
+  // Gated on liveAnnounced (see toggleLiveAnnounced()), not just latestCode existing -- a share
+  // code gets created automatically the moment sharing starts, which can be well before there's
+  // anything worth a follower watching. The organizer has to deliberately flip the toggle first.
+  if(!d||!d.latestCode||!d.liveAnnounced)return'';
+  const isPrivate=d.latestVisibility==='private';
+  const action=isPrivate?`requestFollowApproval('${d.latestCode}')`:`followSharedTournament('${d.latestCode}')`;
+  return`<div class="shared-pending-banner" style="background:rgba(46,204,113,0.15);border-color:rgba(46,204,113,0.45);cursor:pointer;margin-bottom:10px" onclick="closeRecapModal();${action}">
+    <div style="font-weight:700">🔴 Live now${isPrivate?' (private)':''}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${esc(d.latestLabel||'A tournament')} — tap to ${isPrivate?'request to view':'jump in'}</div>
+  </div>`;
+}
 // Instagram-style profile preview: resolves a host CODE (from a ?followhost= link, or typed
 // into the "Follow a Host" box) and shows their profile -- stats bar, tournament grid, Career
 // pill, tappable player cards -- WITHOUT following them yet. hostProfiles/{uid} is readable by
@@ -6043,7 +6179,11 @@ async function previewHostProfile(rawCode){
         <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
         <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}⚽ ${p.assists}🅰${p.cleanSheets?' '+p.cleanSheets+'🧤':''}</span>
       </div>`;}).join(''):'<div class="empty-msg">No public tournament stats yet</div>';
-    const gridHtml=list.length?list.map(t=>`
+    // The still-live pointer entry (archived:false) only shows in the grid once the organizer
+    // has actually flipped the "Go live" toggle (liveAnnounced) -- see toggleLiveAnnounced()'s
+    // comment. Archived (saved) tournaments always show regardless.
+    const visibleList=list.filter(t=>t.archived||(d.liveAnnounced&&t.code===d.latestCode));
+    const gridHtml=visibleList.length?visibleList.map(t=>`
       <div class="profile-tile" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">
         <span class="profile-tile-icon">${t.archived?'🏆':'🔴'}</span>
         <div class="profile-tile-label">${esc(t.label||'Tournament')}</div>
@@ -6055,6 +6195,7 @@ async function previewHostProfile(rawCode){
       :`<button class="theme-btn" style="width:100%;margin-top:6px;background:var(--btn-bg);color:#fff" onclick="followHostFromPreview('${code}')">➕ Follow</button>`;
     el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats.</p>
+      ${liveNowBannerHtml(d)}
       <div class="profile-stats-bar">${streakBadgeHtml(streak)}
         <div class="profile-stats-row">
           <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
@@ -9537,10 +9678,11 @@ async function showHostPastTournaments(){
   document.getElementById('recap-modal').style.display='flex';
   try{
     const snap=await hostProfileDocRef(followedHost.hostUid).get();
-    const list=(snap.exists&&Array.isArray(snap.data().pastTournaments))?snap.data().pastTournaments:[];
+    const profData=snap.exists?snap.data():{};
+    const list=Array.isArray(profData.pastTournaments)?profData.pastTournaments:[];
     lastPastTournamentsList=list;
     if(!list.length){
-      el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+      el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>${liveNowBannerHtml(profData)}<p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
       return;
     }
     const followerCount=(snap.exists&&Array.isArray(snap.data().followers))?snap.data().followers.length:0;
@@ -9568,15 +9710,20 @@ async function showHostPastTournaments(){
     // and still-live share sessions can be interleaved here, so tag each tile to tell them apart.
     // Instagram-style: a tappable "post grid" instead of a plain list -- same viewHostPastTournament()
     // click target as before, just tiled instead of stacked.
-    const gridHtml=list.map(t=>`
+    // The still-live pointer entry (archived:false) only shows in the grid once the organizer
+    // has actually flipped the "Go live" toggle (liveAnnounced) -- see toggleLiveAnnounced()'s
+    // comment. Archived (saved) tournaments always show regardless.
+    const visibleList=list.filter(t=>t.archived||(profData.liveAnnounced&&t.code===profData.latestCode));
+    const gridHtml=visibleList.length?visibleList.map(t=>`
       <div class="profile-tile" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">
         <span class="profile-tile-icon">${t.archived?'🏆':'🔴'}</span>
         <div class="profile-tile-label">${esc(t.label||'Tournament')}</div>
         <div class="profile-tile-date">${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' 🔒':''}</div>
-      </div>`).join('');
+      </div>`).join(''):'<div class="empty-msg" style="grid-column:1/-1">Nothing shared yet</div>';
     const highlightsHtml=highlightsStripHtml(list,t=>"viewHostPastTournament('"+t.code+"','"+t.visibility+"','"+(t.historyId||'')+"')");
     el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats -- kept separate from your own.</p>
+      ${liveNowBannerHtml(profData)}
       <div class="profile-stats-bar">${streakBadgeHtml(streak)}
         <div class="profile-stats-row">
           <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
@@ -9852,6 +9999,8 @@ function renderSharedSection(){
       <button class="pc-btn pc-btn-share" style="flex:none" onclick="copyShareCode()">\ud83d\udccb Copy code</button>
     </div>
     <p style="font-size:12px;color:var(--text-muted);margin:8px 0">${isOwner?'You are the organizer.':'Organizer: '+esc(sharedMeta.ownerName)} ${sharedMeta.requireApproval?'\u00b7 approval required to join':'\u00b7 open \u2014 anyone with the code joins instantly'}${followerCount?' \u00b7 '+followerCount+' following':''}${sharedMeta.visibility?' \u00b7 '+(sharedMeta.visibility==='public'?'\ud83d\udce2 public':'\ud83d\udd12 private'):''}</p>
+    ${isOwner?`<button class="theme-btn" style="width:100%;margin-bottom:10px${myLiveAnnounced?';background:#e05252;color:#fff':''}" onclick="toggleLiveAnnounced()">${myLiveAnnounced?'\ud83d\udd34 Live for followers \u2014 tap to stop':'\ud83d\udce2 Go live for followers'}</button>
+    <p style="font-size:11px;color:var(--text-faint);margin:-6px 0 10px">${myLiveAnnounced?'Shown as live on your profile -- followers can jump in and watch updates as you make them.':'Not shown as live yet -- flip this on whenever you\'re ready (teams picked, first match kicking off, whatever makes sense). The share code above already works either way.'}</p>`:''}
     <div class="edit-title" style="margin-top:4px">Invite a co-editor (enters scores, lineups, etc.)</div>
     <p style="font-size:11px;color:var(--text-faint);margin-bottom:8px">For whoever's helping you run it -- scorekeepers, co-organizers. Full edit access, same as you.</p>
     <button class="theme-btn" style="width:100%;margin-bottom:6px" onclick="shareEditLink()">\ud83d\udce4 Share to edit</button>

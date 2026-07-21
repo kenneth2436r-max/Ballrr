@@ -163,6 +163,8 @@ test('showHostPastTournaments lists both live sessions and individually-archived
   const dbStore = {};
   dbStore['hostProfiles/hostUid'] = {
     hostName: 'Aaryan',
+    latestCode: 'CODE3', latestVisibility: 'public', latestLabel: 'Session 3 (live)', latestStartedAt: 3000,
+    liveAnnounced: true,
     pastTournaments: [
       { code:'CODE3', label:'Session 3 (live)', startedAt: 3000, visibility:'public' },
       { code:'CODE2', historyId:'h2', label:'Tournament from session 2', startedAt: 2000, visibility:'public', archived:true },
