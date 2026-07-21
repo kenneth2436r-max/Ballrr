@@ -2884,6 +2884,30 @@ function setPlayerPosition(name,pos){
   else state.playerDB.push({name,positions:[pos]});
   saveState();
 }
+// Optional link from a player's name to their OWN host profile (their own hostCode, from
+// ensureHostCode() -- present if they've ever shared one of their own tournaments). Lets a
+// player card offer "Visit profile", so a viewer can jump straight to following that person as
+// an organizer too, instead of just seeing their stats under someone else's tournament. Lives on
+// the persistent playerDB (same place as positions) so it's set once and carries forward to
+// every future tournament, not re-entered per team/roster.
+function getPlayerLinkedCode(name){
+  const e=state.playerDB.find(p=>p.name===name);
+  return(e&&e.linkedHostCode)||null;
+}
+function setPlayerLinkedCode(name,code){
+  code=(code||'').trim().toUpperCase();
+  let e=state.playerDB.find(p=>p.name===name);
+  if(!e){e={name,positions:['MID']};state.playerDB.push(e);}
+  e.linkedHostCode=code||null;
+  saveState();
+}
+function linkPlayerProfile(name){
+  const current=getPlayerLinkedCode(name);
+  showThemedPrompt(`Link ${name}'s name to their own host code, so their player card can offer a "Visit profile" button (only works if they've shared a tournament of their own -- ask them for their host code from Settings). Leave blank to unlink.`,current||'',(input)=>{
+    setPlayerLinkedCode(name,input);
+    renderDraft();
+  });
+}
 // Toggle a position on/off a player's eligible list. Keeps at least one position selected.
 function togglePlayerPosition(name,pos){
   if(!POSITIONS.includes(pos))return;
@@ -4038,7 +4062,7 @@ function computeRatingStats(){
   const stats={};
   collectMatchRatings().forEach(({name,teamId,rating})=>{
     const k=name+'||'+teamId;
-    if(!stats[k])stats[k]={name,team:state.teamNames[teamId],teamId,position:getPlayerPosition(name),positions:getPlayerPositions(name),sum:0,count:0};
+    if(!stats[k])stats[k]={name,team:state.teamNames[teamId],teamId,position:getPlayerPosition(name),positions:getPlayerPositions(name),code:getPlayerLinkedCode(name),sum:0,count:0};
     stats[k].sum+=rating;stats[k].count++;
   });
   return Object.values(stats).map(s=>({...s,avg:s.sum/s.count}));
@@ -4165,7 +4189,7 @@ function snapshotCurrentTournament(){
     const k=s.name+'||'+s.teamId;
     return{name:s.name,team:s.team,position:s.position,avg:Math.round(s.avg*100)/100,count:s.count,
       goals:goalsByKey[k]||0,assists:assistsByKey[k]||0,cleanSheets:cleanSheetsByKey[k]||0,
-      matchRatings:matchRatingsByKey[k]||[]};
+      matchRatings:matchRatingsByKey[k]||[],code:s.code||null};
   });
   const synergy=computeSynergy().map(p=>({a:p.a,b:p.b,team:p.team,output:Math.round(p.output*100)/100,matches:p.matches,g1:p.g1,a1:p.a1,g2:p.g2,a2:p.a2}));
   // Per-match team-vs-team results (who played whom, the score, and who scored) -- kept lean
@@ -5567,7 +5591,8 @@ function getPlayerCardData(name){
     archetypes,
     trophies,
     achievements,
-    form
+    form,
+    linkedHostCode:getPlayerLinkedCode(nm)
   };
 }
 function calcCardOVR(d){
@@ -5676,6 +5701,7 @@ function showPlayerCard(name){
           <div class="pc-trophy-item"><span class="pc-trophy-icon">${d.trophies.icons[label]}</span><span class="pc-trophy-count">${d.trophies.wins[label]}×</span><span class="pc-trophy-label">${esc(label)}</span></div>`).join('')}</div>
       </div>`:''}
     <div class="pc-actions">
+      ${d.linkedHostCode?`<button class="pc-btn" onclick="closePlayerCard();previewHostProfile('${esc(d.linkedHostCode).replace(/'/g,"\\'")}')">\ud83d\udc64 Visit profile</button>`:''}
       <button class="pc-btn pc-btn-share" onclick="sharePlayerCard('${safe}')">\ud83d\udcf7 Share</button>
       <button class="pc-btn pc-btn-rename" onclick="renamePlayerFromCard('${safe}')">\u270f\ufe0f Fix spelling</button>
       <button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button>
@@ -5715,7 +5741,8 @@ function showHostPlayerCard(name){
     archetypes:computeHostCareerArchetypes(list).filter(a=>a.name===nm),
     trophies:computeHostTrophyCabinet(list).find(t=>t.name===nm)||null,
     achievements:computeHostPlayerAchievements(list,nm),
-    form:computeFormFromRatings(career.matchRatings)
+    form:computeFormFromRatings(career.matchRatings),
+    linkedHostCode:career.code||null
   };
   const ovr=calcCardOVR(d);
   const tier=cardTier(ovr,d);
@@ -5766,6 +5793,7 @@ function showHostPlayerCard(name){
           <div class="pc-trophy-item"><span class="pc-trophy-icon">${d.trophies.icons[label]}</span><span class="pc-trophy-count">${d.trophies.wins[label]}×</span><span class="pc-trophy-label">${esc(label)}</span></div>`).join('')}</div>
       </div>`:''}
     <div class="pc-actions">
+      ${d.linkedHostCode?`<button class="pc-btn pc-btn-rename" onclick="closePlayerCard();previewHostProfile('${esc(d.linkedHostCode).replace(/'/g,"\\'")}')">👤 Visit profile</button>`:''}
       <button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button>
     </div>`;
   document.getElementById('player-card-modal').style.display='flex';
@@ -6743,9 +6771,11 @@ function renderPlayerPositionsSection(){
       const isPrimary=active&&positions[0]===p;
       return`<span class="pos-toggle-chip${active?' active':''}${isPrimary?' primary':''}" title="${isPrimary?'Primary position':active?'Also plays here':'Tap to add'}" onclick="togglePlayerPosition('${safeName}','${p}');renderDraft()">${p}</span>`;
     }).join('');
+    const linkedCode=getPlayerLinkedCode(name);
     return`<div class="pos-picker-row">
       <span class="pp-name">${esc(name)}</span>
       <div class="pos-chip-group">${chips}</div>
+      <button onclick="linkPlayerProfile('${safeName}')" title="${linkedCode?'Linked to host code '+esc(linkedCode)+' -- tap to change or unlink':"Link to this player's own host code, so their card can offer a Visit profile button"}" style="background:none;border:none;color:${linkedCode?'var(--btn-bg)':'var(--text-faint)'};font-size:15px;cursor:pointer;padding:0 4px;line-height:1;flex:none">🔗</button>
       <button onclick="removePlayerFromPositionDB('${safeName}')" title="Remove from the position database (a currently rostered/pooled player will reappear with no positions tagged -- this only truly removes players no longer active anywhere)" style="background:none;border:none;color:var(--text-faint);font-size:16px;cursor:pointer;padding:0 4px;line-height:1;flex:none">×</button>
     </div>`;
   }).join('');
@@ -8245,10 +8275,11 @@ function collapsePlayerStatsByName(playerStats){
   (playerStats||[]).forEach(p=>{
     const nm=(p.name||'').trim();
     if(!nm)return;
-    if(!byName[nm])byName[nm]={name:nm,team:p.team,position:p.position,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matches:0,matchRatings:[]};
+    if(!byName[nm])byName[nm]={name:nm,team:p.team,position:p.position,code:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matches:0,matchRatings:[]};
     const row=byName[nm];
     row.team=p.team||row.team;
     row.position=p.position||row.position;
+    row.code=p.code||row.code;
     row.goals+=p.goals||0;
     row.assists+=p.assists||0;
     row.cleanSheets+=p.cleanSheets||0;
@@ -9640,9 +9671,10 @@ function computeHostCareerLeaderboard(pastTournaments){
   function mergeTournament(rows){
     rows.forEach(p=>{
       const nm=p.name;
-      if(!agg[nm])agg[nm]={name:nm,team:p.team,position:p.position,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
+      if(!agg[nm])agg[nm]={name:nm,team:p.team,position:p.position,code:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
       agg[nm].team=p.team||agg[nm].team;
       agg[nm].position=p.position||agg[nm].position;
+      agg[nm].code=p.code||agg[nm].code;
       agg[nm].goals+=p.goals||0;
       agg[nm].assists+=p.assists||0;
       agg[nm].cleanSheets+=p.cleanSheets||0;
