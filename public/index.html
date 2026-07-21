@@ -198,6 +198,7 @@ button:active,.tab:active,.chip button:active{transform:scale(0.94)}
 .pc-badges{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:14px}
 .pc-badge-pill{font-size:11px;font-weight:700;background:rgba(124,77,255,0.18);color:var(--text);border:1px solid rgba(124,77,255,0.4);border-radius:20px;padding:4px 10px}
 .pc-archetype-pill{background:rgba(255,193,7,0.15);border-color:rgba(255,193,7,0.45)}
+.pc-achievement-pill{background:rgba(46,204,113,0.15);border-color:rgba(46,204,113,0.45)}
 .badge-detail{font-size:11px;color:var(--text-muted)}
 .pc-trophy-cabinet{background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);border-radius:10px;padding:10px;margin-bottom:14px}
 .pc-trophy-title{font-size:11px;font-weight:700;color:#ffc107;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px;text-align:center}
@@ -656,6 +657,7 @@ select option{background:var(--input-bg);color:var(--text)}
 <nav id="sidebar" class="sidebar">
   <div class="sidebar-title">Menu</div>
   <button class="tab active" onclick="showTab('home',this)">🏠 Home</button>
+  <button class="tab" data-mode="tournament" onclick="showTab('activity',this)">🔔 Activity</button>
   <button class="tab" data-mode="tournament" onclick="showTab('table',this)">📊 Table</button>
   <button class="tab" onclick="showTab('matches',this)">⚽ Matches</button>
   <button class="tab" data-mode="tournament" onclick="showTab('scorers',this)">🥅 Scorers</button>
@@ -671,6 +673,13 @@ select option{background:var(--input-bg);color:var(--text)}
 <!-- HOME -->
 <div id="tab-home" class="section active">
   <div id="home-container"></div>
+</div>
+
+<!-- ACTIVITY (lite -- pending join/view requests + your own followers list, both already-live
+     client-side data. Not a new bottom-nav destination, matching the "keep the 5-icon Instagram
+     row" constraint -- reachable from the sidebar like the other classic tabs.) -->
+<div id="tab-activity" class="section">
+  <div id="activity-container"></div>
 </div>
 
 <!-- TABLE -->
@@ -751,6 +760,7 @@ select option{background:var(--input-bg);color:var(--text)}
     <button class="profile-pill active" id="profile-pill-grid" onclick="switchProfilePill('grid')">🗂 Grid</button>
     <button class="profile-pill" id="profile-pill-career" onclick="switchProfilePill('career')">🏆 Career</button>
   </div>
+  <button class="theme-btn" style="width:100%;margin:8px 0" onclick="showMyTeamRivalries()">🔥 Rivalries</button>
   <div id="profile-grid-view">
     <div id="profile-highlights-strip"></div>
     <div id="profile-grid-container" class="profile-grid"></div>
@@ -3351,6 +3361,7 @@ function renderMatches(){
       ${(r.played&&isFriendlyMode())?`<button class="share-btn" onclick="showMatchRecap(${mi})">📝 Recap</button>`:''}
       ${(r.played&&!compact)?mediaLinksHtml(mi,r.mediaLinks):''}
       ${predictionHtml(mi,r)}
+      ${sharedMeta?`<div id="fan-predictions-${mi}" class="prediction-section"></div>`:''}
       ${potmVoteHtml(mi,r,m)}
     </div>`;
   }).join('');
@@ -3363,6 +3374,68 @@ function renderMatches(){
     html+='<div class="section-header" style="margin-top:16px">Knockout</div>'+knockoutSectionHtml();
   }
   c.innerHTML=html;
+  // Fan Predictions (see the block below function renderMatches for the "why a separate system"
+  // note) -- fetched and filled in after the fact, same placeholder-then-async-populate pattern
+  // as loadAndRenderReaction() elsewhere, since renderMatches() itself stays synchronous.
+  if(sharedMeta){
+    state.fixtures.forEach((m,mi)=>loadAndRenderFanPredictions(mi,'fan-predictions-'+mi));
+  }
+}
+
+// FAN PREDICTIONS -- separate from the existing member-only prediction system above
+// (predictionHtml()/submitPrediction()/state.predictions, untouched), which lives inside the
+// shared payload JSON and can only ever be written by MEMBERS per the payload write rule (see
+// firestore.rules) -- FOLLOWERS have read-only payload access, so they could never use it. This
+// is the follower-inclusive version: one tiny doc per person per league match under
+// shared/{code}/fanPredictions, id '{mi}_{uid}' -- same one-doc-per-person-per-item shape as
+// hostProfiles/{uid}/reactions and shared/{code}'s own membership self-service branches, open to
+// members AND followers alike (predicting your own match you're about to play is just for fun).
+// Deliberately its own separate UI section rather than merged into the existing Prediction
+// League board, so the existing, already-tested member-only scoring/leaderboard logic never has
+// to change to accommodate a second data source.
+function fanPredictionsCollectionRef(code){
+  return sharedMetaDocRef(code).collection('fanPredictions');
+}
+function fanPredictionRowHtml(p,actual){
+  const hit=!!(actual&&p.scoreA===actual[0]&&p.scoreB===actual[1]);
+  return`<div class="ledger-row">${hit?'🎯 ':''}<span class="ledger-name">${esc(p.name||'Fan')}</span><span style="font-weight:700">${p.scoreA}–${p.scoreB}</span></div>`;
+}
+async function loadAndRenderFanPredictions(mi,targetElId){
+  const el=document.getElementById(targetElId);
+  if(!el||!currentUser||!sharedMeta)return;
+  el.dataset.mi=mi;
+  try{
+    const snap=await fanPredictionsCollectionRef(sharedMeta.code).where('mi','==',String(mi)).get();
+    const docs=snap.docs.map(d=>d.data());
+    const mine=docs.find(p=>p.uid===currentUser.uid)||null;
+    const r=state.results[mi];
+    if(r&&r.played){
+      const actual=r.g||[0,0];
+      const rows=docs.length?docs.map(p=>fanPredictionRowHtml(p,actual)).join(''):'<div class="empty-msg">No fan predictions for this one</div>';
+      el.innerHTML=`<div class="scorers-label">🎉 Fan Predictions</div>${rows}`;
+      return;
+    }
+    el.innerHTML=`<div class="scorers-label">🎉 Fan Predictions <span style="color:var(--text-faint);font-weight:400">(open to everyone)</span></div>
+      <div class="pool-add-row">
+        <input type="number" min="0" max="20" id="fanpred-a-${mi}" value="${mine?mine.scoreA:''}" placeholder="A" style="width:50px;text-align:center;flex:none">
+        <span style="align-self:center">–</span>
+        <input type="number" min="0" max="20" id="fanpred-b-${mi}" value="${mine?mine.scoreB:''}" placeholder="B" style="width:50px;text-align:center;flex:none">
+        <button onclick="submitFanPrediction(${mi})">${mine?'Update':'Predict'}</button>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${docs.length} fan prediction${docs.length===1?'':'s'} so far</div>`;
+  }catch(e){console.error('Could not load fan predictions:',e);}
+}
+async function submitFanPrediction(mi){
+  if(!currentUser){alert('Sign in to predict.');return;}
+  if(!sharedMeta)return;
+  const aInput=document.getElementById('fanpred-a-'+mi),bInput=document.getElementById('fanpred-b-'+mi);
+  const a=parseInt(aInput&&aInput.value,10),b=parseInt(bInput&&bInput.value,10);
+  if(isNaN(a)||isNaN(b)||a<0||b<0){alert('Enter a valid score for both teams.');return;}
+  try{
+    await fanPredictionsCollectionRef(sharedMeta.code).doc(mi+'_'+currentUser.uid).set({mi:String(mi),uid:currentUser.uid,name:currentUser.displayName||currentUser.email||'Fan',scoreA:a,scoreB:b,ts:Date.now()});
+    haptic('tap');
+    await loadAndRenderFanPredictions(mi,'fan-predictions-'+mi);
+  }catch(e){console.error('Could not save fan prediction:',e);alert('Could not save your prediction: '+(e.message||e));}
 }
 
 function calcMatchScore(resultsArr,mi,fixtures){
@@ -4029,7 +4102,20 @@ function snapshotCurrentTournament(){
       matchRatings:matchRatingsByKey[k]||[]};
   });
   const synergy=computeSynergy().map(p=>({a:p.a,b:p.b,team:p.team,output:Math.round(p.output*100)/100,matches:p.matches,g1:p.g1,a1:p.a1,g2:p.g2,a2:p.a2}));
-  return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy};
+  // Per-match team-vs-team results (who played whom, the score, and who scored) -- kept lean
+  // (team NAMES rather than ids, scorer names without the full goals/assists/rating breakdown
+  // already captured in playerStats above) since this is purely for Head-to-Head Rivalries
+  // (computeTeamRivalries()) reconstructing "who's beaten who" across a device's whole saved
+  // history, which the table/playerStats above can't do on their own -- they only ever kept
+  // final standings and season-long totals, never the individual results that produced them.
+  // Reuses allPlayedMatchesWithTeams() (already covers league + every knockout format) rather
+  // than re-deriving match traversal.
+  const matches=allPlayedMatchesWithTeams().map(({teamIds,m})=>({
+    teamA:state.teamNames[teamIds[0]],teamB:state.teamNames[teamIds[1]],
+    scoreA:m.g[0],scoreB:m.g[1],
+    scorers:(m.scorers||[]).map(s=>({name:(s.name||'').trim(),side:s.team===teamIds[0]?'A':'B'})).filter(s=>s.name)
+  }));
+  return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy,matches};
 }
 
 function saveTournamentToHistory(){
@@ -4114,7 +4200,7 @@ async function publishArchivedTournamentNow(historyId){
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
     if(priorPast.some(t=>t.historyId===historyId))return; // already published -- nothing to do
-    const trimmedSnapshot={numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy};
+    const trimmedSnapshot={numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[]};
     const newEntry={code:getActiveSharedCode()||'',historyId,label:entry.label,startedAt:entry.savedAt||Date.now(),dateStr:entry.date||'',visibility:'public',archived:true,snapshot:trimmedSnapshot};
     const pastTournaments=[newEntry,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
@@ -4150,7 +4236,7 @@ async function publishAllArchivedTournaments(){
     const newEntries=missing.map(t=>({
       code:activeCode,historyId:t.id,label:t.label,startedAt:t.savedAt||Date.now(),dateStr:t.date||'',
       visibility:'public',archived:true,
-      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats,synergy:t.synergy}
+      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats,synergy:t.synergy,matches:t.matches||[]}
     }));
     const pastTournaments=[...newEntries,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
@@ -4183,7 +4269,7 @@ async function setArchivedTournamentVisibility(historyId,newVisibility){
       alert("This tournament was never shared with your followers, so there's nothing to change.");
       return;
     }
-    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy}:null;
+    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[]}:null;
     const pastTournaments=priorPast.map(t=>t.historyId===historyId?{...t,visibility:newVisibility,snapshot:trimmedSnapshot}:t);
     await ref.set({pastTournaments},{merge:true});
     entry.visibility=newVisibility;
@@ -4252,7 +4338,7 @@ async function publishArchivedTournamentToFollowers(historyId,label,dateStr,snap
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
     const isPrivate=visibility==='private';
-    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats,synergy:snapshot.synergy}:null;
+    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats,synergy:snapshot.synergy,matches:snapshot.matches||[]}:null;
     const code=sharedMeta?sharedMeta.code:(getActiveSharedCode()||'');
     const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility,archived:true,snapshot:trimmedSnapshot};
     // Smaller cap than before (40 vs the old 60) -- each entry now carries real tournament data,
@@ -4772,6 +4858,102 @@ function shareCanvasAsImage(canvas,filename,shareTitle,shareText){
   },'image/png');
 }
 
+// Truncates canvas text with an ellipsis so a long tournament label doesn't overrun the card --
+// shareStandings() above never needed this since its title text is always short and generated
+// ("N-team tournament"), but recap card labels are free-typed team-vs-team names.
+function fitCanvasText(ctx,text,maxWidth){
+  if(ctx.measureText(text).width<=maxWidth)return text;
+  let t=text;
+  while(t.length>1&&ctx.measureText(t+'…').width>maxWidth)t=t.slice(0,-1);
+  return t+'…';
+}
+// Shared canvas artwork for a shareable tournament recap card (final table + star player + top
+// scorer) -- used by both this device's own finished tournaments (shareMyTournamentRecap()) and
+// a followed host's published tournaments (shareHostTournamentRecap()). The two callers only
+// differ in where table/playerStats come from (state.tournamentHistory vs a published
+// snapshot), so the drawing itself is shared rather than duplicated, same as shareCanvasAsImage()
+// already is for the underlying share-sheet plumbing.
+function drawTournamentRecapCanvas(label,dateStr,table,playerStats){
+  const rows=(table||[]).slice(0,6);
+  const W=900,H=Math.max(640,260+rows.length*54+120);
+  const canvas=document.createElement('canvas');
+  canvas.width=W;canvas.height=H;
+  const ctx=canvas.getContext('2d');
+  const grad=ctx.createLinearGradient(0,0,W,H);
+  grad.addColorStop(0,'#1a1030');grad.addColorStop(1,'#2d1a54');
+  ctx.fillStyle=grad;ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgba(124,77,255,0.22)';
+  ctx.beginPath();ctx.arc(W-60,50,150,0,Math.PI*2);ctx.fill();
+
+  ctx.textAlign='center';
+  ctx.fillStyle='#A78BFA';ctx.font='700 18px Arial';
+  ctx.fillText('BALLRR · TOURNAMENT RECAP',W/2,50);
+  ctx.fillStyle='#fff';ctx.font='800 28px Arial';
+  ctx.fillText(fitCanvasText(ctx,label||'Tournament',W-100),W/2,90);
+  ctx.font='600 14px Arial';ctx.fillStyle='#c9b8f5';
+  ctx.fillText(dateStr||'',W/2,120);
+
+  let y=170;
+  if(rows.length){
+    ctx.font='700 13px Arial';ctx.fillStyle='#c9b8f5';
+    ctx.textAlign='left';ctx.fillText('#',50,y);ctx.fillText('TEAM',100,y);
+    ctx.textAlign='right';ctx.fillText('PTS',850,y);
+    y+=16;
+    ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.beginPath();ctx.moveTo(50,y);ctx.lineTo(850,y);ctx.stroke();
+    y+=36;
+    rows.forEach((row,i)=>{
+      ctx.textAlign='left';
+      ctx.font='700 20px Arial';ctx.fillStyle=i===0?'#FAC775':'#fff';
+      ctx.fillText(String(i+1),50,y);
+      ctx.font='600 20px Arial';ctx.fillStyle='#fff';
+      ctx.fillText(fitCanvasText(ctx,(i===0?'🏆 ':'')+row.name,660),100,y);
+      ctx.font='800 20px Arial';ctx.fillStyle='#fff';
+      ctx.textAlign='right';ctx.fillText(String(row.pts),850,y);
+      y+=54;
+    });
+    y+=10;
+  }
+
+  const rated=(playerStats||[]).slice().sort((a,b)=>(b.avg||0)-(a.avg||0));
+  const scored=(playerStats||[]).slice().sort((a,b)=>(b.goals||0)-(a.goals||0));
+  ctx.textAlign='center';
+  if(rated.length&&rated[0].avg){
+    ctx.font='600 18px Arial';ctx.fillStyle='#e5dcff';
+    ctx.fillText(`⭐ Star player: ${rated[0].name} (${rated[0].avg.toFixed(1)})`,W/2,y);
+    y+=30;
+  }
+  if(scored.length&&scored[0].goals){
+    ctx.font='600 18px Arial';ctx.fillStyle='#e5dcff';
+    ctx.fillText(`⚽ Top scorer: ${scored[0].name} (${scored[0].goals})`,W/2,y);
+    y+=30;
+  }
+
+  ctx.font='600 14px Arial';ctx.fillStyle='rgba(255,255,255,0.5)';
+  ctx.fillText('Tracked live with Ballrr',W/2,H-30);
+  return canvas;
+}
+// Owner side: shares one of THIS device's own saved tournaments (state.tournamentHistory).
+function shareMyTournamentRecap(id){
+  haptic('tap');
+  const t=(state.tournamentHistory||[]).find(x=>x.id===id);
+  if(!t)return;
+  const canvas=drawTournamentRecapCanvas(t.label||(t.teamNames||[]).join(' vs '),t.date||'',t.table,t.playerStats);
+  shareCanvasAsImage(canvas,'ballrr-recap.png','Tournament Recap',`${t.label||'Tournament'} — tracked on Ballrr`);
+}
+// Follower side: shares whatever host tournament is currently open in the recap modal. Reads
+// lastViewedRecapEntry (set by viewArchivedTournamentSnapshot()) rather than taking the entry as
+// a param, since embedding the whole entry object as JSON in an onclick attribute is fragile --
+// same reasoning as state._lastRecapText for copyMatchRecap() above.
+let lastViewedRecapEntry=null;
+function shareHostTournamentRecap(){
+  haptic('tap');
+  const entry=lastViewedRecapEntry;
+  if(!entry||!entry.snapshot)return;
+  const s=entry.snapshot;
+  const canvas=drawTournamentRecapCanvas(entry.label||'Tournament',entry.dateStr||'',s.table,s.playerStats);
+  shareCanvasAsImage(canvas,'ballrr-recap.png','Tournament Recap',`${entry.label||'Tournament'} — tracked on Ballrr`);
+}
+
 function shareStandings(){
   haptic('tap');
   const table=calcTable();
@@ -5154,6 +5336,7 @@ function getPlayerCardData(name){
   const badges=computePlayerBadges().filter(b=>b.name===nm);
   const archetypes=computeCareerArchetypes().filter(a=>a.name===nm);
   const trophies=computeTrophyCabinet().find(t=>t.name===nm)||null;
+  const achievements=computePlayerAchievements(nm);
   const form=computePlayerForm(nm);
   return{
     name:nm,team:team||'Unknown',teamId,
@@ -5167,6 +5350,7 @@ function getPlayerCardData(name){
     badges,
     archetypes,
     trophies,
+    achievements,
     form
   };
 }
@@ -5269,6 +5453,7 @@ function showPlayerCard(name){
       </div>`:''}
     ${d.badges.length?`<div class="pc-badges">${d.badges.map(b=>`<span class="pc-badge-pill">${b.icon} ${esc(b.label)}</span>`).join('')}</div>`:''}
     ${d.archetypes.length?`<div class="pc-badges">${d.archetypes.map(a=>`<span class="pc-badge-pill pc-archetype-pill">${a.icon} ${esc(a.label)}</span>`).join('')}</div>`:''}
+    ${d.achievements&&d.achievements.length?`<div class="pc-badges">${d.achievements.map(a=>`<span class="pc-badge-pill pc-achievement-pill" title="${esc(a.detail)}">${a.icon} ${esc(a.label)}</span>`).join('')}</div>`:''}
     ${d.trophies&&d.trophies.total?`<div class="pc-trophy-cabinet">
         <div class="pc-trophy-title">🏆 Trophy Cabinet · ${d.trophies.total} total</div>
         <div class="pc-trophy-row">${Object.keys(d.trophies.wins).map(label=>`
@@ -5313,6 +5498,7 @@ function showHostPlayerCard(name){
     badges:[],
     archetypes:computeHostCareerArchetypes(list).filter(a=>a.name===nm),
     trophies:computeHostTrophyCabinet(list).find(t=>t.name===nm)||null,
+    achievements:computeHostPlayerAchievements(list,nm),
     form:computeFormFromRatings(career.matchRatings)
   };
   const ovr=calcCardOVR(d);
@@ -5357,6 +5543,7 @@ function showHostPlayerCard(name){
         <span class="pc-form-dots">${d.form.dots.map(r=>`<span class="pc-form-dot ${r>=7?'good':r>=5?'mid':'low'}">${r.toFixed(1)}</span>`).join('')}</span>
       </div>`:''}
     ${d.archetypes.length?`<div class="pc-badges">${d.archetypes.map(a=>`<span class="pc-badge-pill pc-archetype-pill">${a.icon} ${esc(a.label)}</span>`).join('')}</div>`:''}
+    ${d.achievements&&d.achievements.length?`<div class="pc-badges">${d.achievements.map(a=>`<span class="pc-badge-pill pc-achievement-pill" title="${esc(a.detail)}">${a.icon} ${esc(a.label)}</span>`).join('')}</div>`:''}
     ${d.trophies&&d.trophies.total?`<div class="pc-trophy-cabinet">
         <div class="pc-trophy-title">🏆 Trophy Cabinet · ${d.trophies.total} total</div>
         <div class="pc-trophy-row">${Object.keys(d.trophies.wins).map(label=>`
@@ -5881,6 +6068,7 @@ async function previewHostProfile(rawCode){
         <button class="profile-pill active" id="host-profile-pill-grid" onclick="switchHostProfilePill('grid')">🗂 Archive</button>
         <button class="profile-pill" id="host-profile-pill-career" onclick="switchHostProfilePill('career')">🏆 Career</button>
       </div>
+      <button class="theme-btn" style="width:100%;margin:8px 0" onclick="showHostTeamRivalries()">🔥 Rivalries</button>
       <div id="host-profile-grid-view">
         <div class="section-header">Archive — Saved Tournaments</div>
         ${highlightsHtml}
@@ -7935,6 +8123,127 @@ function computeCareerArchetypes(){
   return archetypes;
 }
 
+// ACHIEVEMENTS: permanent career milestone badges, distinct from both computeCareerArchetypes()
+// above (which crowns a single "best in the league right now" player per category, and can
+// change hands as stats shift) and computeTrophyCabinet() (which tallies per-TOURNAMENT
+// end-of-tournament awards). Achievements are threshold-based, so any number of players can hold
+// the same badge once they cross it, and once earned they never go away -- the same way
+// Duolingo/Xbox-style badges work. Built from the same aggregate rows computeCareerLeaderboard()
+// already produces for the Career tab, so no new stats tracking is needed. Shared between this
+// device's own players (computePlayerAchievements) and a followed host's public players
+// (computeHostPlayerAchievements, below computeHostCareerArchetypes) via one thresholds table,
+// so the two stay in sync automatically.
+function achievementBadgeDefs(row,trophyTotal){
+  const badges=[];
+  if(!row)return badges;
+  if(row.goals>=1)badges.push({icon:'⚽',label:'On the Scoresheet',detail:'Scored a career goal'});
+  if(row.goals>=10)badges.push({icon:'🥅',label:'Golden Boot Contender',detail:`${row.goals} career goals`});
+  if(row.goals>=25)badges.push({icon:'👑',label:'Goal Machine',detail:`${row.goals} career goals`});
+  if(row.assists>=5)badges.push({icon:'🎁',label:'Provider',detail:`${row.assists} career assists`});
+  if(row.assists>=15)badges.push({icon:'🧠',label:'Chief Creator',detail:`${row.assists} career assists`});
+  if(row.cleanSheets>=3)badges.push({icon:'🧤',label:'Safe Hands',detail:`${row.cleanSheets} clean sheets`});
+  if(row.cleanSheets>=10)badges.push({icon:'🏰',label:'Iron Wall',detail:`${row.cleanSheets} clean sheets`});
+  if(row.tournaments>=5)badges.push({icon:'🎽',label:'Regular',detail:`${row.tournaments} tournaments played`});
+  if(row.tournaments>=15)badges.push({icon:'🦾',label:'Veteran',detail:`${row.tournaments} tournaments played`});
+  if(row.matches>=20)badges.push({icon:'📅',label:'Ever Present',detail:`${row.matches} career matches`});
+  if(row.avg!=null&&row.matches>=5&&row.avg>=7.5)badges.push({icon:'⭐',label:'Consistent Performer',detail:`${row.avg.toFixed(1)} career avg rating`});
+  if(row.goals>=2&&row.assists>=2&&Math.abs(row.goals-row.assists)<=1)badges.push({icon:'🔄',label:'Two-Way Threat',detail:`${row.goals}⚽ ${row.assists}🅰`});
+  if(trophyTotal>=1)badges.push({icon:'🏆',label:'Trophy Winner',detail:`${trophyTotal} end-of-tournament award${trophyTotal===1?'':'s'}`});
+  if(trophyTotal>=5)badges.push({icon:'🏅',label:'Serial Winner',detail:`${trophyTotal} end-of-tournament awards`});
+  return badges;
+}
+function computePlayerAchievements(name){
+  const row=computeCareerLeaderboard().find(p=>p.name===name);
+  if(!row)return[];
+  const trophyTotal=(computeTrophyCabinet().find(t=>t.name===name)||{}).total||0;
+  return achievementBadgeDefs(row,trophyTotal);
+}
+
+// HEAD-TO-HEAD RIVALRIES: every team pairing that has ever met, aggregated across this device's
+// whole saved history -- distinct from headToHeadRecord()/rivalryHtml() above, which only ever
+// looked at rematches WITHIN the single tournament currently being played (e.g. a double
+// round-robin), since it read straight from state.fixtures/state.results. Reconstructing "who's
+// beaten who" across separate tournaments needs each saved tournament to have kept a per-match
+// record, which is what the "matches" field added to snapshotCurrentTournament() (see its own
+// comment) is for. Tournaments saved before that shipped simply won't have a .matches array and
+// are silently skipped -- their meetings just don't count towards a rivalry, same graceful
+// degradation used elsewhere in this file for older saved data missing a newer field.
+function collectAllPlayedMatches(){
+  const list=[];
+  (state.tournamentHistory||[]).forEach(t=>(t.matches||[]).forEach(m=>list.push(m)));
+  // The CURRENTLY live tournament isn't in tournamentHistory yet until it's saved -- fold its
+  // already-played matches in too, same live-plus-archive merge computeCareerLeaderboard() does,
+  // guarded the same way (skip once this tournament's own archive entry already covers it).
+  if(!state.careerSnapshotSaved){
+    allPlayedMatchesWithTeams().forEach(({teamIds,m})=>{
+      list.push({
+        teamA:state.teamNames[teamIds[0]],teamB:state.teamNames[teamIds[1]],
+        scoreA:m.g[0],scoreB:m.g[1],
+        scorers:(m.scorers||[]).map(s=>({name:(s.name||'').trim(),side:s.team===teamIds[0]?'A':'B'})).filter(s=>s.name)
+      });
+    });
+  }
+  return list;
+}
+// Shared aggregation logic -- takes a flat list of {teamA,teamB,scoreA,scoreB,scorers} match
+// records (from either collectAllPlayedMatches() for this device's own data, or a host's public
+// pastTournaments snapshots for the follower-facing side below) and groups them into one record
+// per unique team pairing, canonicalized by sorting the two names so "A vs B" and "B vs A" merge
+// into the same rivalry regardless of which team was "home" in the saved data.
+function computeTeamRivalries(matchList){
+  const byPair={};
+  (matchList||[]).forEach(m=>{
+    if(!m||!m.teamA||!m.teamB)return;
+    const[low,high]=[m.teamA,m.teamB].slice().sort();
+    const key=low+'||'+high;
+    if(!byPair[key])byPair[key]={teamA:low,teamB:high,matches:0,winsA:0,winsB:0,draws:0,biggestWin:null,scorers:{}};
+    const rec=byPair[key];
+    const aIsLow=m.teamA===low;
+    const scoreLow=aIsLow?m.scoreA:m.scoreB,scoreHigh=aIsLow?m.scoreB:m.scoreA;
+    rec.matches++;
+    if(scoreLow>scoreHigh)rec.winsA++;
+    else if(scoreHigh>scoreLow)rec.winsB++;
+    else rec.draws++;
+    const margin=Math.abs(scoreLow-scoreHigh);
+    if(margin>0&&(!rec.biggestWin||margin>rec.biggestWin.margin)){
+      rec.biggestWin={winner:scoreLow>scoreHigh?low:high,loser:scoreLow>scoreHigh?high:low,scoreFor:Math.max(scoreLow,scoreHigh),scoreAgainst:Math.min(scoreLow,scoreHigh),margin};
+    }
+    (m.scorers||[]).forEach(s=>{
+      const scorerTeam=(aIsLow===(s.side==='A'))?low:high;
+      const skey=s.name+'||'+scorerTeam;
+      if(!rec.scorers[skey])rec.scorers[skey]={name:s.name,team:scorerTeam,goals:0};
+      rec.scorers[skey].goals++;
+    });
+  });
+  return Object.values(byPair).map(rec=>({
+    ...rec,
+    topScorers:Object.values(rec.scorers).sort((a,b)=>b.goals-a.goals).slice(0,3)
+  })).sort((a,b)=>b.matches-a.matches);
+}
+function computeMyTeamRivalries(){
+  return computeTeamRivalries(collectAllPlayedMatches());
+}
+function rivalryRowHtml(rec){
+  const bw=rec.biggestWin?`Biggest win: ${esc(rec.biggestWin.winner)} ${rec.biggestWin.scoreFor}–${rec.biggestWin.scoreAgainst} ${esc(rec.biggestWin.loser)}`:'All draws so far';
+  const scorers=rec.topScorers.length?rec.topScorers.map(s=>`${esc(s.name)} (${s.goals})`).join(', '):'No scorers recorded';
+  return`<div class="scorer-item" style="display:block">
+    <div style="font-weight:700">${esc(rec.teamA)} vs ${esc(rec.teamB)}</div>
+    <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${rec.matches} meeting${rec.matches===1?'':'s'} · ${rec.winsA}-${rec.draws}-${rec.winsB} (W-D-L for ${esc(rec.teamA)})</div>
+    <div style="font-size:12px;color:var(--text-muted)">${bw}</div>
+    <div style="font-size:12px;color:var(--text-muted)">Top scorers: ${scorers}</div>
+  </div>`;
+}
+// Reuses the shared #player-card-modal/#player-card-content generic content modal, same
+// established convention as showProfileTrophies()/showProfileFollowers() above.
+function teamRivalriesListHtml(records){
+  if(!records.length)return`<div class="edit-title" style="margin-bottom:10px">🔥 Rivalries</div><div class="empty-msg">No repeat match-ups yet -- play the same two teams again in a future tournament to start one.</div><button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
+  return`<div class="edit-title" style="margin-bottom:10px">🔥 Rivalries</div>${records.map(rivalryRowHtml).join('')}<button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
+}
+function showMyTeamRivalries(){
+  document.getElementById('player-card-content').innerHTML=teamRivalriesListHtml(computeMyTeamRivalries());
+  document.getElementById('player-card-modal').style.display='flex';
+}
+
 function renderCareer(targetId){
   const el=document.getElementById(targetId||'career-container');
   if(!el)return;
@@ -7987,6 +8296,45 @@ function renderProfile(){
   renderProfileStats();
   renderProfileGrid();
   renderCareer('profile-career-container');
+}
+// ACTIVITY (lite version -- built entirely from data that's already live client-side: this
+// device's own host-level followers list (myFollowersList, kept in sync by
+// startMyFollowersListener()), and the currently active shared tournament's pending join/view
+// requests (sharedMeta, kept in sync by the existing shared-tournament listener). No new
+// Firestore reads, subscriptions, or rules needed -- reuses the exact same
+// approveJoinRequest/rejectJoinRequest/approveFollowerRequest/rejectFollowerRequest actions the
+// Settings tab's pending list already calls.
+function activityFollowersRowsHtml(){
+  if(!myFollowersList.length)return`<div class="empty-msg">No followers yet -- share your follow link from Settings</div>`;
+  return myFollowersList.map(f=>`<div class="ledger-row"><span class="ledger-name">👤 ${esc(f.name)}</span></div>`).join('');
+}
+function renderActivity(){
+  const el=document.getElementById('activity-container');
+  if(!el)return;
+  if(!currentUser){el.innerHTML=`<div class="empty-msg">Sign in to see your activity.</div>`;return;}
+  const isOwner=!!(sharedMeta&&sharedMeta.ownerId===currentUser.uid);
+  const names=(sharedMeta&&sharedMeta.memberNames)||{};
+  const followerNames=(sharedMeta&&sharedMeta.followerNames)||{};
+  const pendingRows=isOwner&&sharedMeta.requireApproval?(sharedMeta.pendingRequests||[]).map(p=>`
+    <div class="ledger-row">
+      <span class="ledger-name">${esc(names[p]||'Someone')} wants to join &amp; edit</span>
+      <button class="pc-btn pc-btn-share" style="flex:none;padding:6px 10px" onclick="approveJoinRequest('${p}')">✓ Approve</button>
+      <button class="rem-btn" onclick="rejectJoinRequest('${p}')">×</button>
+    </div>`).join(''):'';
+  const pendingFollowRows=isOwner&&sharedMeta.visibility==='private'?(sharedMeta.pendingFollowerRequests||[]).map(p=>`
+    <div class="ledger-row">
+      <span class="ledger-name">👀 ${esc(followerNames[p]||'Someone')} wants to view</span>
+      <button class="pc-btn pc-btn-share" style="flex:none;padding:6px 10px" onclick="approveFollowerRequest('${p}')">✓ Approve</button>
+      <button class="rem-btn" onclick="rejectFollowerRequest('${p}')">×</button>
+    </div>`).join(''):'';
+  const pendingSection=`
+    <div class="edit-title" style="margin-bottom:8px">⏳ Needs your approval</div>
+    ${(pendingRows||pendingFollowRows)?(pendingRows+pendingFollowRows):'<div class="empty-msg">Nothing waiting right now</div>'}`;
+  el.innerHTML=`
+    ${pendingSection}
+    <div class="edit-title" style="margin:18px 0 8px">👥 Your followers (${myFollowersList.length})</div>
+    ${activityFollowersRowsHtml()}
+  `;
 }
 // Instagram-Streaks-style: counts back from the most recent tournament how many in a row were
 // each within 10 days of the previous one -- a rough "still going" cadence signal, not a strict
@@ -8123,6 +8471,7 @@ function openProfileEntry(id){
   if(t.note)html+=`<div class="customko-hint" style="margin-top:8px">${esc(t.note)}</div>`;
   html+='<div id="profile-entry-reaction"></div>';
   html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="toggleTournamentHighlight('${t.id}')">${t.highlighted?'★ Remove from Highlights':'☆ Add to Highlights'}</button>`;
+  html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="shareMyTournamentRecap('${t.id}')">📤 Share recap card</button>`;
   html+='<button class="theme-btn" style="width:100%;margin-top:8px" onclick="closeProfileEntry()">Close</button>';
   document.getElementById('profile-entry-content').innerHTML=html;
   document.getElementById('profile-entry-modal').style.display='flex';
@@ -8527,7 +8876,7 @@ function switchAppMode(mode){
   renderAppModeUI();
   haptic('tap');
 }
-const QUICKMATCH_HIDDEN_TABS=['table','scorers','lineups','draft','allresults','archive','career','profile','search'];
+const QUICKMATCH_HIDDEN_TABS=['table','scorers','lineups','draft','allresults','archive','career','profile','search','activity'];
 function renderAppModeUI(){
   const isQuick=state.appMode==='quickmatch';
   const tBtn=document.getElementById('appmode-btn-tournament');
@@ -9098,6 +9447,31 @@ function computeHostCareerArchetypes(pastTournaments){
   topBy(p=>p.goals>=2&&p.assists>=2&&Math.abs(p.goals-p.assists)<=1,p=>p.goals+p.assists,'🔄','Box-to-Box',p=>`${p.goals}⚽ ${p.assists}🅰 — equally dangerous both ways`);
   return archetypes;
 }
+// Follower-facing equivalent of computePlayerAchievements() -- same threshold table
+// (achievementBadgeDefs(), see the "ACHIEVEMENTS" comment above computePlayerAchievements),
+// just fed by the host's PUBLIC career data instead of this device's own.
+function computeHostPlayerAchievements(pastTournaments,name){
+  const row=computeHostCareerLeaderboard(pastTournaments).find(p=>p.name===name);
+  if(!row)return[];
+  const trophyTotal=(computeHostTrophyCabinet(pastTournaments).find(t=>t.name===name)||{}).total||0;
+  return achievementBadgeDefs(row,trophyTotal);
+}
+// Follower-facing equivalent of computeMyTeamRivalries() -- same computeTeamRivalries()
+// aggregation, just fed by the host's PUBLIC pastTournaments snapshots (each one's .matches
+// field, added alongside this feature -- older published snapshots won't have it and are
+// silently skipped, same graceful degradation as the owner-facing side).
+function computeHostTeamRivalries(pastTournaments){
+  const list=[];
+  (pastTournaments||[]).forEach(t=>{
+    if(t.snapshot&&Array.isArray(t.snapshot.matches))list.push(...t.snapshot.matches);
+  });
+  return computeTeamRivalries(list);
+}
+function showHostTeamRivalries(){
+  const list=lastPastTournamentsList||[];
+  document.getElementById('player-card-content').innerHTML=teamRivalriesListHtml(computeHostTeamRivalries(list));
+  document.getElementById('player-card-modal').style.display='flex';
+}
 // Follower-facing equivalent of computeTrophyCabinet() -- tallies per-tournament Golden
 // Boot/Playmaker/Golden Glove/Player of the Tournament awards, but only across the host's
 // PUBLISHED (public, snapshot-carrying) tournaments -- exactly the same per-tournament data
@@ -9215,6 +9589,7 @@ async function showHostPastTournaments(){
         <button class="profile-pill active" id="host-profile-pill-grid" onclick="switchHostProfilePill('grid')">🗂 Archive</button>
         <button class="profile-pill" id="host-profile-pill-career" onclick="switchHostProfilePill('career')">🏆 Career</button>
       </div>
+      <button class="theme-btn" style="width:100%;margin:8px 0" onclick="showHostTeamRivalries()">🔥 Rivalries</button>
       <div id="host-profile-grid-view">
         <div class="section-header">Archive — Saved Tournaments</div>
         ${highlightsHtml}
@@ -9326,6 +9701,7 @@ async function toggleReaction(hostUid,historyId){
 // the recap modal -- no join/follow/network round-trip to the original shared session needed.
 function viewArchivedTournamentSnapshot(entry){
   const el=document.getElementById('recap-card-content');
+  lastViewedRecapEntry=entry;
   if(!entry||!entry.snapshot){
     el.innerHTML=`<div class="recap-title">\ud83d\udcda Tournament</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">This tournament's details aren't available.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
     document.getElementById('recap-modal').style.display='flex';
@@ -9351,7 +9727,7 @@ function viewArchivedTournamentSnapshot(entry){
     ${ratingRows?`<div class="edit-title" style="margin-top:0">Top Performers</div>${ratingRows}`:''}
     ${synergyRows?`<div class="section-header">Top Synergy</div>${synergyRows}`:''}
     <div id="recap-reaction"></div>
-    <div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+    <div class="recap-actions"><button class="pc-btn pc-btn-share" onclick="shareHostTournamentRecap()">📤 Share</button><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
   document.getElementById('recap-modal').style.display='flex';
   loadAndRenderReaction(lastViewedHostUid,entry.historyId,'recap-reaction');
 }
@@ -9863,6 +10239,52 @@ function renderSub(){
     :`${state.numTeams} teams · ${legsLabel(state.legs).toLowerCase()} round robin · FIFA points`;
 }
 
+// Instagram-Stories-style: a horizontal strip of auto-generated "fact cards" at the top of Home
+// -- no photo/video upload in this app, so these are computed from whatever's actually happened
+// so far (a streak, the latest result, top scorer, top-rated player), skipping any that don't
+// have anything to show yet. Reuses the same .highlights-strip/.highlight-circle look as the
+// Profile tab's Highlights row and #player-card-modal for the tap-through view, matching the
+// established pattern of reusing that modal for lightweight generic content.
+let currentHomeStories=[];
+function computeHomeStories(){
+  const stories=[];
+  const streak=computeTournamentStreak((state.tournamentHistory||[]).map(t=>t.date));
+  if(streak>=2)stories.push({icon:'🔥',title:'Streak',detail:streak+' tournaments in a row so far -- still going.'});
+  const lastPlayedIdx=(state.results||[]).map((r,i)=>r.played?i:-1).filter(i=>i>=0).pop();
+  if(lastPlayedIdx!=null){
+    const r=state.results[lastPlayedIdx];
+    const[a,b]=state.fixtures[lastPlayedIdx];
+    stories.push({icon:'⚽',title:'Latest Result',detail:`${state.teamNames[a]} ${r.g[0]} – ${r.g[1]} ${state.teamNames[b]}`});
+  }
+  const{scorerList}=computeGoalsAssistsTally();
+  const topScorerRow=scorerList[0];
+  if(topScorerRow&&topScorerRow.count>0)stories.push({icon:'🥅',title:'Top Scorer',detail:`${topScorerRow.name} — ${topScorerRow.count} goal${topScorerRow.count===1?'':'s'} so far`});
+  const ratingRows=computeRatingStats().filter(r=>r.count>=1).sort((a,b)=>b.avg-a.avg);
+  if(ratingRows.length)stories.push({icon:'⭐',title:'Top Rated',detail:`${ratingRows[0].name} — ${ratingRows[0].avg.toFixed(1)} average rating`});
+  return stories;
+}
+function homeStoriesStripHtml(){
+  currentHomeStories=computeHomeStories();
+  if(!currentHomeStories.length)return'';
+  return`<div class="highlights-strip">${currentHomeStories.map((s,i)=>`
+    <div class="highlight-circle" onclick="openHomeStory(${i})">
+      <div class="highlight-circle-icon">${s.icon}</div>
+      <div class="highlight-circle-label">${esc(s.title)}</div>
+    </div>`).join('')}</div>`;
+}
+function openHomeStory(i){
+  const s=currentHomeStories[i];
+  if(!s)return;
+  document.getElementById('player-card-content').innerHTML=`
+    <div style="text-align:center;padding:20px 10px">
+      <div style="font-size:48px;margin-bottom:10px">${s.icon}</div>
+      <div class="edit-title" style="margin-bottom:8px">${esc(s.title)}</div>
+      <p style="font-size:14px;color:var(--text-muted)">${esc(s.detail)}</p>
+    </div>
+    <button class="theme-btn" style="width:100%;margin-top:10px" onclick="closePlayerCard()">Close</button>`;
+  document.getElementById('player-card-modal').style.display='flex';
+}
+
 function renderHome(){
   const c=document.getElementById('home-container');
   if(!c)return;
@@ -9903,7 +10325,7 @@ function renderHome(){
   const tableTitle=isKO?'Knockout Bracket':'League Table';
   const tableSub=isKO?"See who's through and who's out":'Check the live standings';
 
-  c.innerHTML=heroHtml+`
+  c.innerHTML=heroHtml+homeStoriesStripHtml()+`
     <p class="home-brief">${esc(brief)}</p>
     <div class="home-cards">
       <div class="home-card" onclick="openTournamentWizard()">
@@ -9929,7 +10351,7 @@ function renderAll(){
   updatePendingApprovalUI();
   if(isPendingApproval())return; // nothing else to render -- the waiting screen covers everything
   document.body.classList.toggle('viewer-mode',isViewerMode());
-  const steps=[renderSub,renderHome,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderReelsFeed,renderArchive,renderCareer,renderProfile,renderSettings];
+  const steps=[renderSub,renderHome,renderActivity,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderReelsFeed,renderArchive,renderCareer,renderProfile,renderSettings];
   steps.forEach(fn=>{
     try{fn();}catch(e){console.error('Render step failed:',fn.name,e);}
   });
@@ -9966,7 +10388,7 @@ function updatePendingApprovalUI(){
 // 'knockout' is kept as an alias for 'matches' -- the Knockout tab was merged into Matches, but
 // a few other places (cue cards, the Home screen's shortcut cards) may still reference the old
 // tab name by habit, and this keeps the tab pill label sensible if so instead of showing "knockout".
-const TAB_LABELS={home:'🏠 Home',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',reels:'🎬 Reels',search:'🔍 Search',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
+const TAB_LABELS={home:'🏠 Home',activity:'🔔 Activity',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',reels:'🎬 Reels',search:'🔍 Search',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
 /* ---------- ANDROID HARDWARE/GESTURE BACK BUTTON ----------
  * Capacitor's default behavior for a WebView with no browser navigation history is to just
  * exit the app on back -- since this whole app is a single page with tabs swapped via JS

@@ -120,6 +120,26 @@ service cloud.firestore {
         allow write: if request.auth != null &&
           request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members;
       }
+
+      // Fan Predictions -- separate from the state.predictions system embedded in payload above
+      // (which only MEMBERS can write, per the payload write rule right above this one).
+      // FOLLOWERS have read-only payload access and could never use that system, so this gives
+      // them (and members, for fun) their own way to guess a league match's scoreline. One tiny
+      // doc per person per match, id '{mi}_{uid}' -- same one-doc-per-person-per-item shape as
+      // hostProfiles/{uid}/reactions, which is what lets the create/update rule below guarantee
+      // someone can only ever write the ONE doc that embeds their own uid.
+      match /fanPredictions/{predictionId} {
+        allow read: if request.auth != null && (
+          request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members ||
+          request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.followers
+        );
+        allow create, update: if request.auth != null &&
+          (request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.members ||
+           request.auth.uid in get(/databases/$(database)/documents/shared/$(code)).data.followers) &&
+          predictionId == (request.resource.data.mi + '_' + request.auth.uid) &&
+          request.resource.data.uid == request.auth.uid;
+        allow delete: if request.auth != null && request.auth.uid == resource.data.uid;
+      }
     }
 
     // Host-level following: lets someone follow a PERSON (not a single tournament code) and get
