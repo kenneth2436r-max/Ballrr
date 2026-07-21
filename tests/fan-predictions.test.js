@@ -110,4 +110,11 @@ test('renderMatches inserts a fan-predictions placeholder per league match only 
   `);
   assert.ok(!r.soloHtml.includes('fan-predictions-0'), 'a solo (non-shared) tournament should not show a fan predictions section');
   assert.ok(r.sharedHtml.includes('id="fan-predictions-0"'), 'a shared tournament should have a fan predictions placeholder per match');
+  // Regression check: the fan-predictions wrapper must carry its own `fan-prediction-section`
+  // class (in addition to the shared `prediction-section` layout class it happens to reuse from
+  // the separate member-only prediction league) -- see the body.viewer-mode CSS rule in the
+  // <style> block. Without this distinct class, a follower's read-only lockdown (which correctly
+  // disables the member-only prediction league's inputs) would ALSO disable fan predictions,
+  // even though those are specifically meant to be followers-submittable.
+  assert.ok(r.sharedHtml.includes('class="prediction-section fan-prediction-section"'), 'the fan-predictions wrapper needs its own class so viewer-mode CSS can unlock it without also reopening the real edit-access prediction league to followers');
 });

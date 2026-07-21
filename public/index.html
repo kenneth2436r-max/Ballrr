@@ -131,6 +131,18 @@ body.viewer-mode .section select#lineup-select{
   pointer-events:auto;
   opacity:1;
 }
+/* Fan Predictions (submitFanPrediction()) are deliberately open to followers too -- unlike the
+   member-only Prediction League above (predictionHtml()/submitPrediction(), which writes
+   straight into the shared tournament state and so correctly stays locked), fan predictions go
+   through their own Firestore subcollection that follower accounts are allowed to write to.
+   Both happen to share the base .prediction-section class for layout, so this needs its own,
+   more specific class (fan-prediction-section, set on the wrapper in renderMatches()) to unlock
+   just this one without also reopening the real edit-access prediction league to followers. */
+body.viewer-mode .section .fan-prediction-section button,
+body.viewer-mode .section .fan-prediction-section input{
+  pointer-events:auto;
+  opacity:1;
+}
 .sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(5,2,10,0.55);z-index:9990}
 .sidebar-backdrop.open{display:block;animation:fadeIn 0.2s ease}
 .sidebar{position:fixed;top:0;left:0;bottom:0;width:78%;max-width:300px;background:var(--card-bg);z-index:9991;transform:translateX(-105%);transition:transform 0.25s cubic-bezier(.4,0,.2,1);padding:max(20px,env(safe-area-inset-top)) 14px max(20px,env(safe-area-inset-bottom)) max(14px,env(safe-area-inset-left));overflow-y:auto;box-shadow:6px 0 30px rgba(0,0,0,0.35)}
@@ -3426,7 +3438,7 @@ function renderMatches(){
         <span class="team-name-s right">${teamLabel(m[1])}</span>
       </div>
       ${predictionHtml(mi,r)}
-      ${sharedMeta?`<div id="fan-predictions-${mi}" class="prediction-section"></div>`:''}
+      ${sharedMeta?`<div id="fan-predictions-${mi}" class="prediction-section fan-prediction-section"></div>`:''}
       ${matchTimerHtml(mi,r,compact)}
       ${matchFeedHtml(mi,r)}
       <div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:10px">Score is the total of goal scorers added below. No scorers yet = 0–0.</div>
