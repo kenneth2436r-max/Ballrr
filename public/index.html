@@ -851,8 +851,16 @@ select option{background:var(--input-bg);color:var(--text)}
 <div id="tab-settings" class="section">
   <div class="edit-section">
     <div class="edit-title">Get the App</div>
-    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Android: download and install directly. iPhone: add this site to your Home Screen from Safari (Share icon → Add to Home Screen) for an app-like experience — no App Store needed.</p>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">iPhone: add this site to your Home Screen from Safari (Share icon → Add to Home Screen) for an app-like experience — no App Store needed.</p>
+    <!-- Android .apk download temporarily disabled -- the file itself was moved out of public/
+         (from public/downloads/ to ../archived-downloads/, sibling to public/, not deleted) so
+         Firebase Hosting no longer serves it at all, not just hidden from this UI. To restore:
+         move archived-downloads/ballrr-app.bin back to public/downloads/ballrr-app.bin and
+         restore the download link below (removed rather than commented out so it can't dangle
+         as a broken/pointless link while the file is unavailable), then redeploy.
     <a href="/downloads/ballrr-app.bin" download="ballrr.apk" style="display:block;width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;text-align:center;text-decoration:none;box-sizing:border-box">⬇ Download Android App (.apk)</a>
+    -->
+    <p style="font-size:12px;color:var(--text-faint);font-style:italic">Android download is temporarily unavailable — check back soon.</p>
   </div>
   <div class="edit-section">
     <div class="edit-title">Appearance</div>
