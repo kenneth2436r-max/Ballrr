@@ -3005,6 +3005,64 @@ function fixSeedV2GoalkeeperMerge(){
   bad.assists=0;
   t.playerStats.push({name:'Sherin',team:bad.team,position:'MID',avg:null,count:bad.count,goals:0,assists:1,cleanSheets:0});
 }
+// Third reconstructed tournament -- the one lost when its shared session was disbanded before
+// the co-host auto-preserve fix existed (see preserveSharedHistoryOnDisband()/
+// handleSharedMetaSnap()'s comments). Rebuilt from the recap card screenshot the user shared:
+// table and every top-8 player's exact goals/assists/rating/position/team are taken directly
+// from it. Raj and Sherin appear only in the Top Synergy list, not the top-8 ratings, so their
+// own individual stats aren't available and are left uncredited beyond the synergy pairing shown
+// -- edit them in from the Archive if the real numbers are known. Not hooked into ensureShape()
+// (see the NOTE above about why the first two seeds were removed from running automatically for
+// every account) -- only runs when explicitly triggered via restoreLostJuly29Tournament(), a
+// one-time Settings button meant to be removed once used.
+function seedThirdTournamentHistoryEntry(){
+  if(state._seededHistoryV3)return;
+  state._seededHistoryV3=true;
+  if(state.tournamentHistory.some(t=>t.id==='seed-2026-07-29'))return;
+  state.tournamentHistory.push({
+    id:'seed-2026-07-29',
+    date:'2026-07-29',
+    label:'Ryan United vs Shane Madrid vs Jason FC',
+    numTeams:3,
+    legs:3,
+    teamNames:['Ryan United','Shane Madrid','Jason FC'],
+    table:[
+      {name:'Ryan United',p:6,w:4,d:0,l:2,gf:8,ga:8,gd:0,pts:12},
+      {name:'Shane Madrid',p:6,w:3,d:0,l:3,gf:12,ga:7,gd:5,pts:9},
+      {name:'Jason FC',p:6,w:2,d:0,l:4,gf:8,ga:13,gd:-5,pts:6}
+    ],
+    playerStats:[
+      {name:'Hritiq',team:'Shane Madrid',position:'MID',avg:7.6,count:6,goals:4,assists:2,cleanSheets:0},
+      {name:'Ayush',team:'Shane Madrid',position:'MID',avg:7.5,count:6,goals:5,assists:0,cleanSheets:0},
+      {name:'Manas',team:'Ryan United',position:'GK',avg:7.4,count:6,goals:1,assists:0,cleanSheets:0},
+      {name:'Jason',team:'Jason FC',position:'DEF',avg:7.4,count:6,goals:3,assists:0,cleanSheets:0},
+      {name:'Lokesh+1',team:'Ryan United',position:'MID',avg:7.4,count:6,goals:3,assists:0,cleanSheets:0},
+      {name:'Shane',team:'Shane Madrid',position:'GK',avg:7.3,count:6,goals:1,assists:1,cleanSheets:0},
+      {name:'Ryan',team:'Ryan United',position:'MID',avg:7.2,count:6,goals:1,assists:1,cleanSheets:0},
+      {name:'Densil',team:'Ryan United',position:'FWD',avg:7.2,count:6,goals:3,assists:0,cleanSheets:0}
+    ],
+    synergy:[
+      {a:'Hritiq',b:'Ayush',team:'Shane Madrid',output:3.9,matches:6,g1:4,a1:2,g2:5,a2:0},
+      {a:'Hritiq',b:'Raj',team:'Shane Madrid',output:3.5,matches:6,g1:4,a1:2,g2:0,a2:0},
+      {a:'Sherin',b:'Ayush',team:'Shane Madrid',output:3.0,matches:6,g1:0,a1:0,g2:5,a2:0}
+    ],
+    note:"Reconstructed from the recap card screenshot for this tournament, which was lost when its shared session was disbanded before the auto-preserve fix existed. The table and every top-8 player's goals/assists/rating/position/team are exact, taken directly from the recap. Raj and Sherin appear only in the Top Synergy section (not the top-8 ratings), so their own individual goals/assists/ratings aren't available -- only the synergy pairing shown is recorded for them. The synergy g1/a1/g2/a2 breakdown mirrors each player's overall tournament total (a full round-robin with a fixed roster), not a separately confirmed per-pairing count.",
+    savedAt:Date.parse('2026-07-29')
+  });
+}
+// One-time manual trigger for seedThirdTournamentHistoryEntry() -- a temporary Settings button
+// (see the "Restore missing tournament" section) rather than anything automatic, since running
+// this for every account (like the first two seeds used to) would inject the tournament owner's
+// own data into a brand new user's archive. Safe to tap more than once (idempotent, guarded by
+// both _seededHistoryV3 and the id check inside the seed function itself).
+function restoreLostJuly29Tournament(){
+  seedThirdTournamentHistoryEntry();
+  saveState();
+  renderArchive();
+  alert('Restored: Ryan United vs Shane Madrid vs Jason FC (2026-07-29) is back in your Archive.');
+  syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+  syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id==='seed-2026-07-29')).catch(e=>console.error('Could not sync verified contributions:',e));
+}
 function ensureShape(){
   if(!state.numTeams)state.numTeams=state.teamNames?state.teamNames.length:3;
   if(!state.legs)state.legs=1;
@@ -9226,6 +9284,13 @@ function renderArchive(){
     <div class="customko-hint">Played somewhere not tracked in this app -- a pickup game, a league that doesn't use Ballrr, filling in for another team? Log your own performance here so it still counts toward your career stats and player card, same as a tournament run in the app.</div>
     <button class="theme-btn" style="width:100%" onclick="logExternalMatchEntry()">📍 Log External Match</button>
   </div>`;
+  if(!(state.tournamentHistory||[]).some(t=>t.id==='seed-2026-07-29')){
+    html+=`<div class="edit-section">
+      <div class="edit-title">Restore Missing Tournament</div>
+      <div class="customko-hint">One-time recovery: brings back "Ryan United vs Shane Madrid vs Jason FC" (2026-07-29), which was lost when its shared session was disbanded before the auto-preserve fix existed. Reconstructed from your recap screenshot -- table and top-8 player stats are exact.</div>
+      <button class="theme-btn" style="width:100%" onclick="restoreLostJuly29Tournament()">↩️ Restore July 29 Tournament</button>
+    </div>`;
+  }
   const history=(state.tournamentHistory||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
   html+='<div class="section-header">Saved Tournaments</div>';
   // Tournaments saved before newer saves started auto-publishing to followers (or saved while
