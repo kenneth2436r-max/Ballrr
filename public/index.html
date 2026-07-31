@@ -7110,7 +7110,17 @@ async function previewHostProfile(rawCode){
     // stats. A tournament can still always be found via the plain Follow/View flow if the
     // organizer is still actively sharing it live (that's a separate, still-active session, not
     // this archived-profile view).
-    const visibleList=list.filter(t=>(t.archived&&t.visibility!=='private')||(d.liveAnnounced&&t.code===d.latestCode));
+    // IMPORTANT: this must branch on t.archived FIRST, not OR the two conditions together --
+    // "Publish all to followers" (publishAllArchivedTournaments()) and the original auto-publish
+    // both stamp an archived entry's `code` field with whatever share code happened to be active
+    // AT THE TIME it was published, which has nothing to do with what that specific tournament
+    // was actually played under (a solo/reconstructed save has no real code of its own at all).
+    // If that borrowed code later happens to also be this host's CURRENT liveAnnounced code, the
+    // old single `||` let an archived tournament marked private slip back in through the "live
+    // pointer" branch, since that branch never checked visibility at all -- exactly what made
+    // "I marked it private and it's still there" possible. Archived entries now ONLY ever go
+    // through the visibility check, full stop, regardless of what code they carry.
+    const visibleList=list.filter(t=>t.archived?t.visibility!=='private':(d.liveAnnounced&&t.code===d.latestCode));
     const gridHtml=visibleList.length?visibleList.map(t=>`
       <div class="profile-tile" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">
         <span class="profile-tile-icon">${t.archived?'🏆':'🔴'}</span>
@@ -10719,8 +10729,11 @@ async function showHostPastTournaments(){
     // the matching fix + comment in previewHostProfile() above for why a private entry is now
     // fully excluded here too, not just visible-but-locked (this is the OTHER of the two nearly
     // identical profile-rendering paths: this one for a host you already follow, the other for
-    // previewing one by code before following -- both had the same gap).
-    const visibleList=list.filter(t=>(t.archived&&t.visibility!=='private')||(profData.liveAnnounced&&t.code===profData.latestCode));
+    // previewing one by code before following -- both had the same gap, including the code-
+    // collision bypass described in previewHostProfile()'s comment -- branch on t.archived FIRST
+    // so a private archived entry can never slip back in through the "live pointer" OR-branch
+    // just because it happens to carry a borrowed/reused code).
+    const visibleList=list.filter(t=>t.archived?t.visibility!=='private':(profData.liveAnnounced&&t.code===profData.latestCode));
     const gridHtml=visibleList.length?visibleList.map(t=>`
       <div class="profile-tile" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">
         <span class="profile-tile-icon">${t.archived?'🏆':'🔴'}</span>

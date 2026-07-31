@@ -189,6 +189,38 @@ test('showHostPastTournaments lists both live sessions and individually-archived
   assert.ok(!html.includes('First tournament in session 1'), 'a private entry must not appear in the grid at all, not just be locked');
 });
 
+// Regression test for: "i did it but it's still there" -- publishAllArchivedTournaments() (the
+// "Publish all to followers" button) and the original auto-publish both stamp a newly-published
+// archived entry's `code` field with whatever share code happened to be active AT PUBLISH TIME,
+// which has nothing to do with what that tournament was actually played under (a solo save has no
+// real code of its own). If that borrowed code later collides with the host's CURRENT
+// liveAnnounced code, the old `(t.archived&&visibility!=='private')||(liveAnnounced&&code===latestCode)`
+// let a PRIVATE archived entry slip back in through the second half of the OR, since that half
+// never checked visibility at all. Fixed by branching on t.archived first.
+test('an archived tournament marked private stays hidden even if it happens to share its code with the host\'s current live-announced session', async () => {
+  const dbStore = {};
+  dbStore['hostProfiles/hostUid'] = {
+    hostName: 'Aaryan',
+    latestCode: 'SAMECODE', latestVisibility: 'public', latestLabel: 'Current live session', latestStartedAt: 5000,
+    liveAnnounced: true,
+    pastTournaments: [
+      { code:'SAMECODE', label:'Current live session', startedAt: 5000, visibility:'public' },
+      // Published via "Publish all to followers" while SAMECODE happened to be the active code --
+      // this tournament was never actually part of that session, it's a solo/reconstructed save.
+      { code:'SAMECODE', historyId:'seed-2026-07-29', label:'Reconstructed Cup', startedAt: 1000, visibility:'private', archived:true },
+    ],
+  };
+  const { window } = freshWindow({ dbStore });
+  window.localStorage.setItem('ballrr_followed_host_v1', JSON.stringify({ hostUid:'hostUid', hostCode:'ABCDEF', hostName:'Aaryan', lastSeenStartedAt:0 }));
+  runInOneEval(window, `followedHost = getFollowedHost();`);
+  await window.showHostPastTournaments();
+  for(let i=0;i<10;i++) await new Promise(r=>setTimeout(r,0));
+
+  const html = window.document.getElementById('recap-card-content').innerHTML;
+  assert.ok(html.includes('Current live session'), 'the actual live pointer entry should still show');
+  assert.ok(!html.includes('Reconstructed Cup'), 'the private archived entry must stay hidden despite sharing a code with the live session');
+});
+
 // Regression test for: "the followers still just see a tournament no longer available pop up".
 // Root cause: viewing an archived entry used to join/follow its ORIGINAL shared/{code} session,
 // which the host may have long since disbanded (deleting that doc entirely) -- even though the
