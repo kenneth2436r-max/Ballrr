@@ -69,8 +69,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 /* Instagram-style bottom nav -- purely additive: the existing hamburger sidebar (and every one
    of its tabs) is completely untouched, this just adds a second, quicker way to reach the 5 most
    common destinations. Reuses showTab(name,this) directly on Home/Search/Reels/Profile so their
-   active-state highlighting, quickmatch-mode hide/show (data-mode="tournament"), and tab history
-   all keep working exactly like the sidebar's own buttons -- no new logic needed for any of that. */
+   active-state highlighting and tab history all keep working exactly like the sidebar's own
+   buttons -- no new logic needed for any of that. */
 .bottom-nav{position:fixed;left:0;right:0;bottom:0;z-index:9990;background:var(--card-bg);border-top:1px solid var(--border);padding-bottom:env(safe-area-inset-bottom);box-shadow:0 -4px 20px rgba(0,0,0,0.15)}
 .bottom-nav-inner{display:flex;justify-content:space-around;align-items:center;width:100%;max-width:460px;margin:0 auto;padding:6px max(8px,env(safe-area-inset-left)) 6px max(8px,env(safe-area-inset-right))}
 @media (min-width:700px){.bottom-nav-inner{max-width:680px}}
@@ -669,15 +669,15 @@ select option{background:var(--input-bg);color:var(--text)}
 <nav id="sidebar" class="sidebar">
   <div class="sidebar-title">Menu</div>
   <button class="tab active" onclick="showTab('home',this)">🏠 Home</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('activity',this)">🔔 Activity</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('table',this)">📊 Table</button>
+  <button class="tab" onclick="showTab('activity',this)">🔔 Activity</button>
+  <button class="tab" onclick="showTab('table',this)">📊 Table</button>
   <button class="tab" onclick="showTab('matches',this)">⚽ Matches</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('scorers',this)">🥅 Scorers</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('lineups',this)">🎽 Lineup</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('draft',this)">🎡 Draft</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('allresults',this)">📜 History</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('archive',this)">🗂 Archive</button>
-  <button class="tab" data-mode="tournament" onclick="showTab('career',this)">🏆 Career</button>
+  <button class="tab" onclick="showTab('scorers',this)">🥅 Scorers</button>
+  <button class="tab" onclick="showTab('lineups',this)">🎽 Lineup</button>
+  <button class="tab" onclick="showTab('draft',this)">🎡 Draft</button>
+  <button class="tab" onclick="showTab('allresults',this)">📜 History</button>
+  <button class="tab" onclick="showTab('archive',this)">🗂 Archive</button>
+  <button class="tab" onclick="showTab('career',this)">🏆 Career</button>
   <button class="tab" onclick="showTab('help',this)">ℹ️ Help</button>
   <button class="tab" onclick="showTab('settings',this)">⚙ Settings</button>
 </nav>
@@ -794,7 +794,7 @@ select option{background:var(--input-bg);color:var(--text)}
   <div class="help-faq">
     <div class="help-faq-item">
       <button class="help-faq-q" onclick="toggleHelpFaq(this)"><span>What's the difference between Tournament mode and Quick Match?</span><span class="help-faq-caret">▾</span></button>
-      <div class="help-faq-a"><p>Tournament mode runs your full multi-team competition — league table, knockout bracket, draft, stats, the works. Quick Match (top of the screen) is a fast single 2-team scoreboard for a one-off kickabout. It doesn't touch your tournament data at all, and switching back to Tournament mode restores everything exactly where you left it.</p></div>
+      <div class="help-faq-a"><p>Tournament mode runs your full multi-team competition — league table, knockout bracket, custom formats. Quick Match (top of the screen) is locked to a single 2-team match for a one-off kickabout, no format setup needed. Both now share the same Draft, Scorers, Lineup and Archive tabs, so you can still pick real players, log goals/assists and save it to your Archive, its ratings count toward Career stats and your global player card exactly the same way a tournament's do. Switching modes never touches the OTHER mode's data -- each keeps its own in-progress match, and switching back restores everything exactly where you left it.</p></div>
     </div>
     <div class="help-faq-item">
       <button class="help-faq-q" onclick="toggleHelpFaq(this)"><span>Friendly vs Competitive mode — what actually changes?</span><span class="help-faq-caret">▾</span></button>
@@ -980,10 +980,10 @@ select option{background:var(--input-bg);color:var(--text)}
 <nav class="bottom-nav" id="bottom-nav">
   <div class="bottom-nav-inner">
     <button class="tab bottom-nav-btn active" onclick="showTab('home',this)"><span class="bottom-nav-icon">🏠</span>Home</button>
-    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('search',this)"><span class="bottom-nav-icon">🔍</span>Search</button>
+    <button class="tab bottom-nav-btn" onclick="showTab('search',this)"><span class="bottom-nav-icon">🔍</span>Search</button>
     <button class="bottom-nav-btn create" onclick="openCreateMenu()"><span class="bottom-nav-icon">➕</span>Create</button>
     <button class="tab bottom-nav-btn" onclick="showTab('reels',this)"><span class="bottom-nav-icon">📰</span>Match Feed</button>
-    <button class="tab bottom-nav-btn" data-mode="tournament" onclick="showTab('profile',this)"><span class="bottom-nav-icon">👤</span>Profile</button>
+    <button class="tab bottom-nav-btn" onclick="showTab('profile',this)"><span class="bottom-nav-icon">👤</span>Profile</button>
   </div>
 </nav>
 
@@ -9886,7 +9886,14 @@ function snapshotMainSlots(){
     fixtures:state.fixtures,results:state.results,page3:state.page3,koRounds:state.koRounds,koThird:state.koThird,
     captains:state.captains,goalkeepers:state.goalkeepers,playerPool:state.playerPool,rotationalPool:state.rotationalPool,players:state.players,
     draftTurnIndex:state.draftTurnIndex,draftBalanced:state.draftBalanced,draftSnake:state.draftSnake,draftPickCount:state.draftPickCount,
-    customKO:state.customKO,customResults:state.customResults
+    customKO:state.customKO,customResults:state.customResults,
+    // Tournament and Quick Match now share the exact same Draft/Scorers/Lineups/Archive
+    // pipeline (see switchAppMode()'s comment), so each needs its OWN "has THIS live session
+    // already been archived" flag -- without it, saving one to the Archive would wrongly mark
+    // the OTHER mode's still-unsaved live stats as "already saved" too the next time you switch
+    // back, silently dropping them out of the live Career/leaderboard count (see
+    // computeCareerLeaderboard()'s careerSnapshotSaved comment for what that flag gates).
+    careerSnapshotSaved:!!state.careerSnapshotSaved
   };
 }
 function restoreMainSlots(snap){
@@ -9896,6 +9903,7 @@ function restoreMainSlots(snap){
   state.draftTurnIndex=snap.draftTurnIndex;state.draftBalanced=snap.draftBalanced;
   state.draftSnake=snap.draftSnake||false;state.draftPickCount=snap.draftPickCount||0;
   state.customKO=snap.customKO;state.customResults=snap.customResults;
+  state.careerSnapshotSaved=!!snap.careerSnapshotSaved;
 }
 function switchAppMode(mode){
   if(mode!=='tournament'&&mode!=='quickmatch')return;
@@ -9913,6 +9921,10 @@ function switchAppMode(mode){
       state.captains=['',''];state.goalkeepers=['',''];state.playerPool=[];state.rotationalPool=[];state.players=[];
       state.draftTurnIndex=0;state.draftBalanced=false;
       state.customKO={enabled:false,stages:[]};state.customResults=[];
+      // Brand new quick match, nothing archived yet -- see snapshotMainSlots()'s comment for why
+      // this has to be reset per-mode instead of inheriting whatever the tournament side's flag
+      // happened to be.
+      state.careerSnapshotSaved=false;
     }
   }else{
     state.quickMatchData=snapshotMainSlots();
@@ -9925,13 +9937,21 @@ function switchAppMode(mode){
   renderAppModeUI();
   haptic('tap');
 }
-const QUICKMATCH_HIDDEN_TABS=['table','scorers','lineups','draft','allresults','archive','career','profile','search','activity'];
+// Used to be a real list of tabs hidden in Quick Match (Draft/Scorers/Lineups/Archive/Career/
+// etc). Quick Match now shares the exact same Draft -> Scorers -> Lineups -> Archive pipeline as
+// Tournament mode (see switchAppMode()'s comment) precisely so a quick 2-team match can be
+// drafted, logged and saved to the Archive with player ratings that stay fully consistent with
+// the Career tab and global verified card -- so nothing is hidden anymore. Left as an empty
+// array (rather than deleted) since the redirect check below still references it defensively.
+const QUICKMATCH_HIDDEN_TABS=[];
 function renderAppModeUI(){
   const isQuick=state.appMode==='quickmatch';
   const tBtn=document.getElementById('appmode-btn-tournament');
   const qBtn=document.getElementById('appmode-btn-quickmatch');
   if(tBtn)tBtn.classList.toggle('active',!isQuick);
   if(qBtn)qBtn.classList.toggle('active',isQuick);
+  // No tab carries data-mode="tournament" anymore (see above), so this no longer hides anything
+  // -- kept as a no-op rather than removed in case a future tab genuinely IS tournament-only.
   document.querySelectorAll('.tab[data-mode="tournament"]').forEach(btn=>{
     btn.style.display=isQuick?'none':'';
   });
@@ -11364,11 +11384,19 @@ function renderHome(){
     </div>`;
   if(state.appMode==='quickmatch'){
     c.innerHTML=heroHtml+`
-      <p class="home-brief">A fast, no-fuss scoreboard for one match — nothing here touches your saved tournament.</p>
+      <p class="home-brief">A fast, no-fuss single match — nothing here touches your saved tournament. Draft real players and save it to your Archive when you're done, so it counts toward Career stats just like a tournament does.</p>
       <div class="home-cards">
+        <div class="home-card" onclick="showTab('draft')">
+          <div class="home-card-icon">🎡</div>
+          <div><div class="home-card-title">Draft players</div><div class="home-card-sub">Build both teams before kickoff</div></div>
+        </div>
         <div class="home-card" onclick="showTab('matches')">
           <div class="home-card-icon">⚽</div>
           <div><div class="home-card-title">Enter the score</div><div class="home-card-sub">Log goals, assists and the result</div></div>
+        </div>
+        <div class="home-card" onclick="saveTournamentToHistory()">
+          <div class="home-card-icon">💾</div>
+          <div><div class="home-card-title">Save to Archive</div><div class="home-card-sub">Counts toward Career stats once saved</div></div>
         </div>
         <div class="home-card" onclick="switchAppMode('tournament')">
           <div class="home-card-icon">🏆</div>
