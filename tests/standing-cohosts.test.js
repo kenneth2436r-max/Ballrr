@@ -36,6 +36,7 @@ test('addStandingCoHost resolves a host code and stores {uid,name,code} on the c
 test('addStandingCoHost rejects an unknown code, your own code, and a duplicate add', async () => {
   const dbStore = {};
   dbStore['hostCodes/FRIEND1'] = { uid: 'friendUid' };
+  dbStore['hostCodes/SELFCODE'] = { uid: 'hostUid' };
   dbStore['hostProfiles/hostUid'] = { hostName: 'Aaryan', hostCode: 'SELFCODE', followers: [], followerNames: {} };
   dbStore['hostProfiles/friendUid'] = { hostName: 'Sam', hostCode: 'FRIEND1', followers: [], followerNames: {} };
   const { window } = freshWindow({ dbStore });
