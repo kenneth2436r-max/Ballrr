@@ -1437,7 +1437,7 @@ function startApp(){
   ensureShape();
   renderAll();
   renderAppModeUI();
-  if(currentUser){startHostFollowListener();startMyFollowersListener();}
+  if(currentUser){startHostFollowListener();startMyFollowersListener();startRatingPoolListener();}
 }
 
 // Keeps this signed-in user's OWN follower list live for the Profile tab's stats bar (the
@@ -1459,6 +1459,13 @@ function startMyFollowersListener(){
     myLatestVisibility=d.latestVisibility||null;
     myLatestLabel=d.latestLabel||null;
     myStandingCoHosts=Array.isArray(d.standingCoHosts)?d.standingCoHosts:[];
+    // Backfill standingCoHostUids (see firestore.rules' ratingPools/{uid} rule) onto any
+    // profile that already has standingCoHosts from before this flat mirror array existed --
+    // safe for the owner's own client to do any time, same pattern as the followers backfill in
+    // applySharedMetaSnap().
+    if(myStandingCoHosts.length&&!Array.isArray(d.standingCoHostUids)){
+      hostProfileDocRef(currentUser.uid).set({standingCoHostUids:myStandingCoHosts.map(c=>c.uid)},{merge:true}).catch(e=>console.error('standingCoHostUids backfill failed:',e));
+    }
     renderProfileStats();
     renderMyLiveBanner();
     renderSharedSection();
@@ -1744,8 +1751,75 @@ function hostProfileDocRef(uid){return fbDb.collection('hostProfiles').doc(uid);
 function hostCodeDocRef(code){return fbDb.collection('hostCodes').doc(code);}
 let sharedPayloadUnsub=null;
 
+/* ---- Shared rating pool (see firestore.rules' ratingPools/{uid} comment for the trust model) ----
+ * Keeps player ratings/career stats consistent no matter which of a trusted group of people
+ * (an owner + their standingCoHosts) actually organizes a given tournament. Each contributing
+ * tournament (from ANY of them) gets merged, by id, into ratingPools/{poolOwnerUid} -- the SAME
+ * shape as a tournamentHistory entry, just shared. ratingPoolHistory is a live-synced local
+ * cache of that doc's contents (kept fresh via ratingPoolUnsub), and effectiveTournamentHistory()
+ * is what every rating/career calculation should read from instead of state.tournamentHistory
+ * directly -- it's the deduped-by-id union of this device's own local archive and the pool. */
+function ratingPoolDocRef(uid){return fbDb.collection('ratingPools').doc(uid);}
+let ratingPoolHistory=[];
+let ratingPoolUnsub=null;
+// Whose pool a NEWLY saved/copied tournament belongs to, and whose pool should be read from
+// right now: the current shared tournament's actual organizer if inside one (so a standing
+// co-host editing someone else's tournament reads/contributes to THAT organizer's pool), or this
+// device's own account otherwise.
+function currentRatingPoolOwnerUid(){
+  if(sharedMeta&&sharedMeta.ownerId)return sharedMeta.ownerId;
+  return currentUser?currentUser.uid:null;
+}
+function startRatingPoolListener(){
+  if(ratingPoolUnsub){ratingPoolUnsub();ratingPoolUnsub=null;}
+  const uid=currentRatingPoolOwnerUid();
+  if(!uid){ratingPoolHistory=[];return;}
+  ratingPoolUnsub=ratingPoolDocRef(uid).onSnapshot(snap=>{
+    ratingPoolHistory=(snap.exists&&snap.data()&&Array.isArray(snap.data().tournamentHistory))?snap.data().tournamentHistory:[];
+    renderAll();
+  },e=>{console.error('Rating pool listener failed:',e);ratingPoolHistory=[];});
+}
+// Merges an explicit list of tournamentHistory-shaped entries into ratingPools/{poolUid}, deduped
+// by id -- same read-merge-write pattern as savePrivateStateToCloudMerged() and
+// preserveSharedHistoryOnDisband(). Idempotent, so re-merging already-present entries is harmless.
+async function mergeIntoRatingPool(poolUid,historyEntries){
+  if(!poolUid||!historyEntries||!historyEntries.length)return;
+  const docRef=ratingPoolDocRef(poolUid);
+  const snap=await docRef.get();
+  const existing=(snap.exists&&snap.data()&&Array.isArray(snap.data().tournamentHistory))?snap.data().tournamentHistory:[];
+  const existingIds=new Set(existing.map(t=>t.id));
+  const merged=existing.slice();
+  let changed=false;
+  historyEntries.forEach(t=>{
+    if(t&&t.id&&!existingIds.has(t.id)){
+      merged.push(t);
+      existingIds.add(t.id);
+      changed=true;
+    }
+  });
+  if(!changed)return;
+  await docRef.set({tournamentHistory:merged,updatedAt:Date.now()},{merge:true});
+}
+// Convenience wrapper for the plain "I just saved a tournament to MY OWN archive" path
+// (saveTournamentToHistory()) -- merges this device's current state.tournamentHistory into
+// whichever pool currentRatingPoolOwnerUid() currently resolves to.
+async function syncRatingPoolWithLocalHistory(){
+  return mergeIntoRatingPool(currentRatingPoolOwnerUid(),state.tournamentHistory||[]);
+}
+// The union every rating/career calculation should read from instead of state.tournamentHistory
+// directly -- this device's own archive plus whatever the shared rating pool (see above) has
+// that isn't already present locally, deduped by id so a tournament that's in both never gets
+// double-counted.
+function effectiveTournamentHistory(){
+  const local=state.tournamentHistory||[];
+  if(!ratingPoolHistory.length)return local;
+  const ids=new Set(local.map(t=>t.id));
+  return local.concat(ratingPoolHistory.filter(t=>t&&t.id&&!ids.has(t.id)));
+}
+
 function applySharedMetaSnap(code,snap){
   const d=snap.data();
+  const priorOwnerId=sharedMeta?sharedMeta.ownerId:undefined;
   sharedMeta={code,ownerId:d.ownerId,ownerName:d.ownerName||'Organizer',members:d.members||[],pendingRequests:d.pendingRequests||[],requireApproval:!!d.requireApproval,memberNames:d.memberNames||{},followers:d.followers||[],followerNames:d.followerNames||{},pendingFollowerRequests:d.pendingFollowerRequests||[],visibility:d.visibility||null};
   // Backfill followers/followerNames onto shared docs created before the Follow feature
   // existed -- any confirmed member's client can do this safely (covered by the "members can
@@ -1754,6 +1828,11 @@ function applySharedMetaSnap(code,snap){
   if(currentUser&&(d.members||[]).includes(currentUser.uid)&&(d.followers===undefined||d.followerNames===undefined)){
     sharedMetaDocRef(code).set({followers:d.followers||[],followerNames:d.followerNames||{}},{merge:true}).catch(e=>console.error('Follower field backfill failed:',e));
   }
+  // The rating pool to read from is whoever organizes THIS tournament (see
+  // currentRatingPoolOwnerUid()) -- only worth restarting the listener when that's actually new
+  // (first join, or -- can't currently happen, ownership never transfers -- a different owner),
+  // not on every routine member-list/approval update this snapshot also fires for.
+  if(priorOwnerId!==d.ownerId)startRatingPoolListener();
 }
 // A follower can read the live tournament data but never write to it (enforced by Firestore
 // rules, not just this check) -- used throughout the UI to hide/disable editing controls and
@@ -2362,7 +2441,12 @@ async function addStandingCoHost(rawCode){
     const profSnap=await hostProfileDocRef(uid).get();
     const name=(profSnap.exists&&profSnap.data().hostName)||'Co-host';
     const next=[...existing,{uid,name,code}];
-    await hostProfileDocRef(currentUser.uid).set({standingCoHosts:next},{merge:true});
+    // standingCoHostUids is a plain array mirroring standingCoHosts (just the uids, no
+    // name/code) -- kept in lockstep purely so Firestore rules can check membership directly
+    // (rules can't map/iterate a list of {uid,name,code} objects to pull out just the uid field,
+    // so this flat parallel list is what ratingPools/{uid}'s rule actually reads). See
+    // firestore.rules for where this gets used.
+    await hostProfileDocRef(currentUser.uid).set({standingCoHosts:next,standingCoHostUids:next.map(c=>c.uid)},{merge:true});
     myStandingCoHosts=next;
     haptic('success');
     renderStandingCoHostsSection();
@@ -2375,7 +2459,7 @@ function removeStandingCoHost(uid){
       const mySnap=await hostProfileDocRef(currentUser.uid).get();
       const existing=(mySnap.exists&&Array.isArray(mySnap.data().standingCoHosts))?mySnap.data().standingCoHosts:[];
       const next=existing.filter(c=>c.uid!==uid);
-      await hostProfileDocRef(currentUser.uid).set({standingCoHosts:next},{merge:true});
+      await hostProfileDocRef(currentUser.uid).set({standingCoHosts:next,standingCoHostUids:next.map(c=>c.uid)},{merge:true});
       myStandingCoHosts=next;
       renderStandingCoHostsSection();
     }catch(e){console.error('Could not remove standing co-host:',e);alert('Could not remove: '+(e.message||e));}
@@ -2535,6 +2619,14 @@ async function preserveSharedHistoryOnDisband(sharedHistory){
     }
   });
   await docRef.set({data:JSON.stringify(privateState),updatedAt:Date.now()},{merge:true});
+  // Also merge into the actual organizer's shared rating pool (not necessarily whoever's
+  // private archive this just got copied into -- a co-host copying/auto-preserving history still
+  // contributes it to the ORGANIZER's pool, see currentRatingPoolOwnerUid()) so ratings stay
+  // consistent for everyone in the trusted group, not just whoever happened to trigger this copy.
+  // Best-effort/non-blocking: this device's own private archive copy above is the important part,
+  // this is a secondary consistency nicety.
+  const poolUid=sharedMeta?sharedMeta.ownerId:currentUser.uid;
+  mergeIntoRatingPool(poolUid,sharedHistory).catch(e=>console.error('Could not sync rating pool on disband/copy:',e));
 }
 // Lets ANY member (not just the owner) pull a copy of this shared tournament's saved history
 // into their OWN private archive at any point, without ending the session for anyone else.
@@ -3136,6 +3228,29 @@ function setPlayerLinkedCode(name,code){
   if(!e){e={name,positions:['MID']};state.playerDB.push(e);}
   e.linkedHostCode=code||null;
   saveState();
+}
+// Marking someone Inactive/Retired never touches their historical stats -- every tournament
+// they already played in stays exactly as saved (Archive, Career leaderboard, Trophy Cabinet,
+// player card all read from tournamentHistory/the rating pool, untouched by this flag). All this
+// does is stop them being offered for NEW picks going forward: excluded from the wheel's random
+// draw (drawWheel() call sites filter on this) and from the Player Pool/Rotational Bench chip
+// lists, so a retired player doesn't accidentally get drafted onto a fresh team. Deliberately
+// does NOT block manually typing their name in anywhere (adding directly to a team, "Who
+// Played", etc.) -- a one-off guest return shouldn't be blocked outright, just not suggested.
+function isPlayerInactive(name){
+  const e=state.playerDB.find(p=>p.name===name);
+  return !!(e&&e.inactive);
+}
+function setPlayerInactive(name,inactive){
+  if(!name)return;
+  let e=state.playerDB.find(p=>p.name===name);
+  if(!e){e={name,positions:['MID']};state.playerDB.push(e);}
+  e.inactive=!!inactive;
+  saveState();
+}
+function togglePlayerInactive(name){
+  setPlayerInactive(name,!isPlayerInactive(name));
+  renderDraft();
 }
 function linkPlayerProfile(name){
   const current=getPlayerLinkedCode(name);
@@ -4312,7 +4427,10 @@ function computeRatingStats(){
 function playerCareerAvg(name){
   const rows=collectMatchRatings().filter(r=>r.name===name);
   let sum=rows.reduce((s,r)=>s+r.rating,0),count=rows.length;
-  (state.tournamentHistory||[]).forEach(t=>{
+  // effectiveTournamentHistory() (not state.tournamentHistory directly) so this baseline stays
+  // consistent with whichever trusted group's shared rating pool applies right now -- see its
+  // own comment for why.
+  effectiveTournamentHistory().forEach(t=>{
     (t.playerStats||[]).forEach(p=>{
       if(p.name===name){sum+=p.avg*p.count;count+=p.count;}
     });
@@ -4497,6 +4615,72 @@ function saveTournamentToHistory(){
       renderArchive();
       alert('Tournament saved to the Archive.');
       publishArchivedTournamentToFollowers(historyId,finalLabel,(dateStr.trim()||todayStr),snap);
+      syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+    });
+  });
+}
+
+// Logs a single match played somewhere NOT tracked in this app (a pickup game, a league that
+// doesn't use Ballrr, filling in for someone else's team) as its OWN tournamentHistory-shaped
+// entry -- same shape saveTournamentToHistory() produces, just with only one player's stats
+// (yours) instead of a full multi-team snapshot, and numTeams/legs/teamNames/table/matches all
+// left empty/null since there's no full tournament behind it. This is deliberately additive to
+// tournamentHistory (not a separate array) so it counts toward playerCareerAvg()/
+// computeCareerLeaderboard()/computeTrophyCabinet() and your player card exactly like an
+// in-app tournament would, and syncs into the shared rating pool the same way too.
+// state.myExternalName remembers what name to attribute these to after the first time, so this
+// doesn't re-ask every single time -- it MUST match the exact spelling used elsewhere for your
+// career stats to actually merge into one player instead of splitting into a duplicate name.
+function logExternalMatchEntry(){
+  if(!currentUser){alert('Sign in first -- external matches are saved to your account so they count toward your career stats.');return;}
+  const todayStr=new Date().toISOString().slice(0,10);
+  const askName=(next)=>{
+    if(state.myExternalName){next();return;}
+    showThemedPrompt("What name should these external matches be tracked under? Use the EXACT same spelling as everywhere else in the app so it's the same player, not a duplicate.",currentUser.displayName||'',(nameStr)=>{
+      const name=(nameStr||'').trim();
+      if(!name){alert('A name is required.');return;}
+      state.myExternalName=name;
+      next();
+    });
+  };
+  askName(()=>{
+    showThemedPrompt('Date played (YYYY-MM-DD):',todayStr,(dateStr)=>{
+      showThemedPrompt('Where/what was this? (e.g. "5-a-side @ Turf Town", "Sunday league vs Riverside"):','',(venueStr)=>{
+        showThemedPrompt('Your position this match (GK/DEF/MID/FWD):',getPlayerPosition(state.myExternalName)||'MID',(posStr)=>{
+          const pos=POSITIONS.includes((posStr||'').trim().toUpperCase())?(posStr.trim().toUpperCase()):'MID';
+          showThemedPrompt('Goals you scored:','0',(goalsStr)=>{
+            showThemedPrompt('Assists you made:','0',(assistsStr)=>{
+              showThemedPrompt('Rate your own performance (1-10):','7',(ratingStr)=>{
+                const goals=Math.max(0,parseInt(goalsStr,10)||0);
+                const assists=Math.max(0,parseInt(assistsStr,10)||0);
+                const rating=Math.min(10,Math.max(1,parseFloat(ratingStr)||7));
+                const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
+                const finalDate=dateStr.trim()||todayStr;
+                const finalVenue=venueStr.trim();
+                state.tournamentHistory=state.tournamentHistory||[];
+                state.tournamentHistory.push({
+                  id,
+                  date:finalDate,
+                  label:'📍 '+(finalVenue||'Match played elsewhere'),
+                  external:true,
+                  venue:finalVenue||null,
+                  numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                  playerStats:[{
+                    name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
+                    goals,assists,cleanSheets:0,matchRatings:[rating],code:null
+                  }],
+                  visibility:'private',
+                  savedAt:Date.now()
+                });
+                saveState();
+                renderArchive();
+                alert('Match logged -- it now counts toward your career stats and player card.');
+                syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+              });
+            });
+          });
+        });
+      });
     });
   });
 }
@@ -7003,7 +7187,7 @@ function renderDraft(){
   </div>`;
 
   c.innerHTML=html;
-  drawWheel(state.playerPool);
+  drawWheel(activeDraftPool());
 }
 
 function renderPlayerPositionsSection(){
@@ -7026,9 +7210,11 @@ function renderPlayerPositionsSection(){
       return`<span class="pos-toggle-chip${active?' active':''}${isPrimary?' primary':''}" title="${isPrimary?'Primary position':active?'Also plays here':'Tap to add'}" onclick="togglePlayerPosition('${safeName}','${p}');renderDraft()">${p}</span>`;
     }).join('');
     const linkedCode=getPlayerLinkedCode(name);
-    return`<div class="pos-picker-row">
-      <span class="pp-name">${esc(name)}</span>
+    const inactive=isPlayerInactive(name);
+    return`<div class="pos-picker-row"${inactive?' style="opacity:0.55"':''}>
+      <span class="pp-name">${esc(name)}${inactive?' <span style="font-size:10px;font-weight:700;color:var(--text-faint);border:1px solid var(--border);border-radius:5px;padding:1px 5px">INACTIVE</span>':''}</span>
       <div class="pos-chip-group">${chips}</div>
+      <button onclick="togglePlayerInactive('${safeName}')" title="${inactive?'Mark active again -- offered for new picks/the wheel again':'Mark Inactive/Retired -- keeps all their stats and card history, just stops them being offered for new picks or the wheel'}" style="background:none;border:none;color:${inactive?'var(--text-faint)':'var(--btn-bg)'};font-size:15px;cursor:pointer;padding:0 4px;line-height:1;flex:none">${inactive?'💤':'🏃'}</button>
       <button onclick="linkPlayerProfile('${safeName}')" title="${linkedCode?'Linked to host code '+esc(linkedCode)+' -- tap to change or unlink':"Link to this player's own host code, so their card can offer a Visit profile button"}" style="background:none;border:none;color:${linkedCode?'var(--btn-bg)':'var(--text-faint)'};font-size:15px;cursor:pointer;padding:0 4px;line-height:1;flex:none">🔗</button>
       <button onclick="removePlayerFromPositionDB('${safeName}')" title="Remove from the position database (a currently rostered/pooled player will reappear with no positions tagged -- this only truly removes players no longer active anywhere)" style="background:none;border:none;color:var(--text-faint);font-size:16px;cursor:pointer;padding:0 4px;line-height:1;flex:none">×</button>
     </div>`;
@@ -7231,6 +7417,14 @@ function resetDraft(){
   });
 }
 
+// The pool the wheel/auto-fill actually draws from -- excludes anyone tagged Inactive/Retired
+// (see setPlayerInactive()) so they never get spun/auto-assigned onto a fresh team. Doesn't
+// remove them from state.playerPool itself (that's still the full list chips/removal work
+// against) -- they just sit there un-pickable until marked active again or manually dragged
+// straight onto a team roster instead of going through the wheel.
+function activeDraftPool(){
+  return state.playerPool.filter(n=>!isPlayerInactive(n));
+}
 function drawWheel(names){
   const canvas=document.getElementById('wheel-canvas');
   if(!canvas)return;
@@ -7274,12 +7468,13 @@ function drawWheel(names){
 let spinning=false;
 function spinWheel(){
   if(spinning)return;
-  if(!state.playerPool.length){alert('Add players to the pool first.');return;}
+  const activePool=activeDraftPool();
+  if(!activePool.length){alert(state.playerPool.length?'Everyone left in the pool is marked Inactive/Retired -- mark someone active again, or add a new player.':'Add players to the pool first.');return;}
   if(!state.numTeams){alert('No teams configured.');return;}
   spinning=true;
   const btn=document.getElementById('spin-btn');
   if(btn)btn.disabled=true;
-  const pool=state.playerPool.slice();
+  const pool=activePool;
   const winnerIdx=Math.floor(Math.random()*pool.length);
   const anglePerSlice=360/pool.length;
   const sliceCenter=winnerIdx*anglePerSlice+anglePerSlice/2;
@@ -7308,12 +7503,16 @@ function spinWheel(){
 // whatever is still left in the pool, so it's safe to use after a few manual spins too.
 function autoFillTeams(){
   if(spinning)return;
-  if(!state.playerPool.length){alert('Add players to the pool first.');return;}
+  const active=activeDraftPool();
+  if(!active.length){alert(state.playerPool.length?'Everyone left in the pool is marked Inactive/Retired -- mark someone active again, or add a new player.':'Add players to the pool first.');return;}
   if(!state.numTeams){alert('No teams configured.');return;}
-  showThemedConfirm(`Instantly assign all ${state.playerPool.length} remaining pool player(s) to teams${state.draftBalanced?' (balanced)':' (turn order)'}? This skips the wheel animation.`,()=>{
-    while(state.playerPool.length){
-      const idx=Math.floor(Math.random()*state.playerPool.length);
-      const name=state.playerPool.splice(idx,1)[0];
+  showThemedConfirm(`Instantly assign all ${active.length} remaining pool player(s) to teams${state.draftBalanced?' (balanced)':' (turn order)'}? This skips the wheel animation.${active.length<state.playerPool.length?' Anyone marked Inactive/Retired is left in the pool untouched.':''}`,()=>{
+    let remaining=active.slice();
+    while(remaining.length){
+      const idx=Math.floor(Math.random()*remaining.length);
+      const name=remaining.splice(idx,1)[0];
+      const poolIdx=state.playerPool.indexOf(name);
+      if(poolIdx>-1)state.playerPool.splice(poolIdx,1);
       const teamId=currentDraftTeamIndex();
       state.players.push({name,team:teamId});
       advanceDraftTurn();
@@ -8569,7 +8768,7 @@ function computeCareerLeaderboard(){
       agg[nm].tournaments+=1;
     });
   }
-  (state.tournamentHistory||[]).forEach(t=>{
+  effectiveTournamentHistory().forEach(t=>{
     mergeTournament(collapsePlayerStatsByName(t.playerStats));
   });
   if(!state.careerSnapshotSaved){
@@ -8618,7 +8817,7 @@ function computeTrophyCabinet(){
     if(topKeeper)award(topKeeper.name,topKeeper.team,'🧤','Golden Glove');
     if(topRated)award(topRated.name,topRated.team,'🏆','Player of the Tournament');
   }
-  (state.tournamentHistory||[]).forEach(t=>tallyFromPlayerStats(t.playerStats));
+  effectiveTournamentHistory().forEach(t=>tallyFromPlayerStats(t.playerStats));
   // Same double-counting guard as computeCareerLeaderboard() above -- skip the live rows once
   // this tournament is already represented by its own archive entry.
   if(!state.careerSnapshotSaved){
@@ -8803,6 +9002,11 @@ function renderArchive(){
     <div class="edit-title">Save Current Tournament</div>
     <div class="customko-hint">Archives this tournament's final standings, player ratings and synergy so you can browse it later by date. Saved ratings keep counting toward the balanced draft in future tournaments, even after you reset.</div>
     <button class="save-btn" onclick="saveTournamentToHistory()">Save Tournament</button>
+  </div>`;
+  html+=`<div class="edit-section">
+    <div class="edit-title">Log a Match Played Elsewhere</div>
+    <div class="customko-hint">Played somewhere not tracked in this app -- a pickup game, a league that doesn't use Ballrr, filling in for another team? Log your own performance here so it still counts toward your career stats and player card, same as a tournament run in the app.</div>
+    <button class="theme-btn" style="width:100%" onclick="logExternalMatchEntry()">📍 Log External Match</button>
   </div>`;
   const history=(state.tournamentHistory||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
   html+='<div class="section-header">Saved Tournaments</div>';

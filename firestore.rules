@@ -207,6 +207,26 @@ service cloud.firestore {
       }
     }
 
+    // The shared rating pool for tournaments organized under this uid's "umbrella" -- lets a
+    // team-balance/rating baseline (playerCareerAvg()/teamAvgRating(), see effectiveTournamentHistory())
+    // stay consistent no matter which of a trusted group of people actually creates a given
+    // tournament, instead of each person's own private tournaments/{uid} archive silently
+    // disagreeing. Deliberately reuses the SAME trust relationship as standing co-hosts (see
+    // hostProfiles/{uid}.standingCoHosts / addStandingCoHost()) -- being trusted to edit
+    // someone's tournaments implies being trusted to read and contribute to their rating pool
+    // too. Uses standingCoHostUids (a flat array of just uids, kept in lockstep with
+    // standingCoHosts) rather than standingCoHosts itself, since rules can't map/iterate a list
+    // of {uid,name,code} objects to pull out just the uid field to check membership with `in`.
+    match /ratingPools/{uid} {
+      allow read, write: if request.auth != null && (
+        request.auth.uid == uid ||
+        (
+          exists(/databases/$(database)/documents/hostProfiles/$(uid)) &&
+          request.auth.uid in get(/databases/$(database)/documents/hostProfiles/$(uid)).data.standingCoHostUids
+        )
+      );
+    }
+
     // Client-side error log fallback for browser/web users (Crashlytics has no web SDK, and
     // this app deliberately avoids Cloud Functions/Analytics billing -- see the notification
     // system for the same tradeoff). Write-only: the app never reads this back, so there's no
