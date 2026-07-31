@@ -905,7 +905,9 @@ select option{background:var(--input-bg);color:var(--text)}
     <div class="edit-title">Account</div>
     <p id="account-status" style="font-size:13px;color:var(--text-muted);margin-bottom:10px">Not signed in (this device only)</p>
     <button id="settings-signin-btn" onclick="document.getElementById('auth-gate').style.display='flex';showAuthGate('Sign in to sync your tournaments across devices','signedout');" style="width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;margin-bottom:6px">Sign in to sync</button>
-    <button id="settings-signout-btn" onclick="doSignOut()" style="display:none;width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer">Sign out</button>
+    <button id="settings-signout-btn" onclick="doSignOut()" style="display:none;width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;margin-bottom:6px">Sign out</button>
+    <button id="settings-syncnow-btn" onclick="syncNowFromCloud()" style="display:none;width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer">🔄 Sync Archive now</button>
+    <p id="settings-syncnow-hint" style="display:none;font-size:11px;color:var(--text-faint);margin-top:6px">If a tournament you saved on another device isn't showing up here, tap this -- it pulls in anything from the cloud this device is missing, and pushes back a merged, complete history so both devices end up in sync. Safe to use any time.</p>
   </div>
   <div class="edit-section">
     <div class="edit-title">Match Day Weather</div>
@@ -1346,9 +1348,75 @@ function saveState(){
     if(code){
       sharedPayloadDocRef(code).set({data:JSON.stringify(state),updatedAt:Date.now()},{merge:true}).catch(e=>console.error('Cloud save failed:',e));
     }else{
-      fbDb.collection('tournaments').doc(currentUser.uid).set({data:JSON.stringify(state),updatedAt:Date.now()}).catch(e=>console.error('Cloud save failed:',e));
+      savePrivateStateToCloudMerged().catch(e=>console.error('Cloud save failed:',e));
     }
   },600);
+}
+
+// Tournament history is meant to be permanent and append-only, but the rest of `state` (the
+// live/in-progress tournament being edited, settings, etc.) is normal last-write-wins -- it's
+// only ever meaningfully edited from one device at a time anyway. Blindly overwriting the WHOLE
+// state blob on every save (the old behavior here) meant using the app on two devices without a
+// full reload in between could silently FORK the archive: whichever device happened to save
+// last would wipe out any tournamentHistory entries the other device had added since they last
+// synced, with no warning -- discovered when a co-host's app had 6 saved tournaments and their
+// own website session only showed 3, each missing entries the other one had. Fixed the same way
+// preserveSharedHistoryOnDisband() already handles the shared->private copy: read the current
+// cloud copy's tournamentHistory first and merge it (union by id -- permanent entries can only
+// ever be ADDED, never dropped) into what's about to be saved. The merged list is also adopted
+// back into this device's own in-memory state, so a device that was behind silently catches up
+// on the other device's saves too, self-healing an existing fork over time instead of just
+// preventing new ones.
+async function savePrivateStateToCloudMerged(){
+  const docRef=fbDb.collection('tournaments').doc(currentUser.uid);
+  try{
+    const snap=await docRef.get();
+    if(snap.exists&&snap.data()&&snap.data().data){
+      let cloudHistory=[];
+      try{cloudHistory=JSON.parse(snap.data().data).tournamentHistory||[];}catch(e){}
+      if(Array.isArray(cloudHistory)&&cloudHistory.length){
+        if(!Array.isArray(state.tournamentHistory))state.tournamentHistory=[];
+        const existingIds=new Set(state.tournamentHistory.map(t=>t.id));
+        let changed=false;
+        cloudHistory.forEach(t=>{
+          if(t&&t.id&&!existingIds.has(t.id)){
+            state.tournamentHistory.push(t);
+            existingIds.add(t.id);
+            changed=true;
+          }
+        });
+        if(changed){
+          state.tournamentHistory.sort((a,b)=>(b.savedAt||0)-(a.savedAt||0));
+          renderAll();
+        }
+      }
+    }
+  }catch(e){
+    console.error('Could not check cloud history before saving, proceeding with local-only save:',e);
+  }
+  await docRef.set({data:JSON.stringify(state),updatedAt:Date.now()});
+}
+
+// Manual "Sync Archive now" button (Settings -> Account) -- mainly a one-time fix for anyone
+// whose Archive already forked across devices before savePrivateStateToCloudMerged() existed
+// (blind overwrites before that could drop entries silently, with no in-app way to notice or
+// force a re-merge). Also just a reassuring, explicit "make sure I'm caught up" action going
+// forward, on top of the automatic merge every regular save already does in the background.
+async function syncNowFromCloud(){
+  if(!currentUser){alert('Sign in first to sync your Archive.');return;}
+  if(getActiveSharedCode()){alert('Leave or disband the shared tournament you\'re currently in before syncing your own private Archive.');return;}
+  const before=(state.tournamentHistory||[]).length;
+  try{
+    await savePrivateStateToCloudMerged();
+    const after=(state.tournamentHistory||[]).length;
+    renderAll();
+    alert(after>before
+      ? `Synced! Pulled in ${after-before} tournament${after-before===1?'':'s'} from the cloud that this device didn't have -- your Archive now has ${after} total.`
+      : `Synced -- this device already had everything from the cloud (${after} tournament${after===1?'':'s'}).`);
+  }catch(e){
+    console.error('Manual sync failed:',e);
+    alert('Sync failed: '+(e.message||e));
+  }
 }
 
 function showAuthGate(statusText,mode){
@@ -1704,7 +1772,19 @@ function isViewerMode(){
 // page refresh.
 function handleSharedMetaSnap(code,snap){
   if(!snap.exists){
-    alert('This shared tournament was deleted by its organizer. Switching back to your own tournament.');
+    // Auto-safeguard for a co-editor who's actively in the app the moment the organizer
+    // disbands: without this, ONLY the organizer's own disbandSharedTournament() call ever gets
+    // a permanent copy of the shared history (see preserveSharedHistoryOnDisband()) -- a member
+    // who never happened to tap the manual "Copy history to my own Archive" button
+    // (copySharedHistoryToMyArchive()) before the session ended would otherwise lose access to
+    // it forever the instant this fires, since the payload doc itself is already deleted from
+    // Firestore by now. What's still recoverable at this exact moment is whatever this client's
+    // own `state.tournamentHistory` was last synced to, in memory, before the doc vanished.
+    const wasMember=!!(sharedMeta&&currentUser&&(sharedMeta.members||[]).includes(currentUser.uid)&&sharedMeta.ownerId!==currentUser.uid);
+    if(wasMember&&state&&Array.isArray(state.tournamentHistory)&&state.tournamentHistory.length){
+      preserveSharedHistoryOnDisband(state.tournamentHistory).catch(e=>console.error('Could not auto-preserve co-host history on disband:',e));
+    }
+    alert('This shared tournament was deleted by its organizer.'+(wasMember?' Anything already saved to its history has been copied into your own Archive.':'')+' Switching back to your own tournament.');
     setActiveSharedCode(null);
     sharedMeta=null;
     if(cloudUnsub){cloudUnsub();cloudUnsub=null;}
@@ -10341,10 +10421,14 @@ function renderSettings(){
     document.getElementById('account-status').textContent='Signed in as '+(currentUser.displayName||currentUser.email||'your account')+' · synced across devices';
     document.getElementById('settings-signin-btn').style.display='none';
     document.getElementById('settings-signout-btn').style.display='block';
+    document.getElementById('settings-syncnow-btn').style.display='block';
+    document.getElementById('settings-syncnow-hint').style.display='block';
   }else{
     document.getElementById('account-status').textContent='Not signed in (this device only)';
     document.getElementById('settings-signin-btn').style.display='block';
     document.getElementById('settings-signout-btn').style.display='none';
+    document.getElementById('settings-syncnow-btn').style.display='none';
+    document.getElementById('settings-syncnow-hint').style.display='none';
   }
   const sel=document.getElementById('cfg-numteams');
   const isCustomTeams=state.numTeams>MAX_TEAMS;
