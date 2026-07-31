@@ -3971,6 +3971,7 @@ function renderMatches(){
       ${r.played?`<button class="share-btn" onclick="shareMatchResult(${mi})">📷 Share result</button>`:''}
       ${(r.played&&isFriendlyMode())?`<button class="share-btn" onclick="showMatchRecap(${mi})">📝 Recap</button>`:''}
       ${(r.played&&!compact)?mediaLinksHtml(mi,r.mediaLinks):''}
+      ${matchAutoPOTMHtml(mi,r,m)}
       ${potmVoteHtml(mi,r,m)}
     </div>`;
   }).join('');
@@ -4183,6 +4184,35 @@ function renderPredictionLeaderboardHtml(){
   </div>`;
 }
 
+/* ---------- AUTOMATIC PLAYER OF THE MATCH ----------
+ * Unlike the community jury vote just below (opt-in, shared-tournaments only, "who did the group
+ * think played best"), this is computed automatically for EVERY played match -- solo or shared,
+ * any format -- straight from the same per-match ratings computeMatchPlayerRatings() already
+ * feeds into the Lineup tab and the saved snapshot's per-match lineup data, so it's guaranteed to
+ * agree with whatever rating a player's card/Lineup tab shows for that same match. Simply the
+ * single highest-rated player across both squads; ties keep whoever was found first (stable,
+ * not random) so repeatedly viewing the same finished match never flip-flops the answer.
+ */
+function computeMatchPOTM(matchObj,teamIds){
+  const ratingsByTeam=computeMatchPlayerRatings(matchObj,teamIds);
+  let best=null;
+  teamIds.forEach(teamId=>{
+    const teamName=state.teamNames[teamId];
+    Object.entries(ratingsByTeam[teamId]||{}).forEach(([name,info])=>{
+      if(!best||info.rating>best.rating)best={name,team:teamName,rating:info.rating};
+    });
+  });
+  return best;
+}
+function matchAutoPOTMHtml(mi,r,m){
+  if(!r.played)return'';
+  const potm=computeMatchPOTM(r,m);
+  if(!potm)return'';
+  return`<div class="potm-section">
+    <div class="scorers-label">⭐ Player of the Match</div>
+    <div class="chip-wrap"><span class="chip">🏆 ${esc(potm.name)} (${esc(potm.team)}) · ${potm.rating.toFixed(1)}</span></div>
+  </div>`;
+}
 /* ---------- COMMUNITY JURY VOTE (Player of the Match) ----------
  * Also shared-tournament only. After a match is played, anyone in the tournament can vote for
  * one player from either squad as Player of the Match -- separate from the stats-driven
@@ -4774,13 +4804,25 @@ function snapshotCurrentTournament(){
       const info=(ratingsByTeam[teamId]&&ratingsByTeam[teamId][name])||{};
       return{name,pos:effectivePlayerPosition(m,name),rating:info.rating!=null?Math.round(info.rating*10)/10:null,goals:info.goals||0,assists:info.assists||0};
     });
+    // Automatic Player of the Match (see computeMatchPOTM()'s own comment) -- derived from the
+    // exact same ratingsByTeam just computed above for the lineup, so it's guaranteed to agree
+    // with the rating shown for that player in this same saved match's lineup. Persisted here so
+    // it survives into the Archive/recap views, not just the live match card.
+    let potm=null;
+    teamIds.forEach(teamId=>{
+      const teamName=state.teamNames[teamId];
+      Object.entries(ratingsByTeam[teamId]||{}).forEach(([name,info])=>{
+        if(!potm||info.rating>potm.rating)potm={name,team:teamName,rating:Math.round(info.rating*10)/10};
+      });
+    });
     return{
       teamA:state.teamNames[teamIds[0]],teamB:state.teamNames[teamIds[1]],
       scoreA:m.g[0],scoreB:m.g[1],
       stage:(label||'').split(' · ')[0]||'League',
       scorers:(m.scorers||[]).map(s=>({name:(s.name||'').trim(),side:s.team===teamIds[0]?'A':'B'})).filter(s=>s.name),
       formation:FORMATIONS[m.formation]?m.formation:'standard',
-      lineup:{A:buildLineup(teamIds[0]),B:buildLineup(teamIds[1])}
+      lineup:{A:buildLineup(teamIds[0]),B:buildLineup(teamIds[1])},
+      potm
     };
   });
   // The overall tournament winner -- see computeTournamentChampion()'s own comment for why this
@@ -7053,7 +7095,7 @@ async function previewHostProfile(rawCode){
       const safe=esc(p.name).replace(/'/g,"\\'");
       return`
       <div class="scorer-item" style="cursor:pointer" onclick="showHostPlayerCard('${safe}')">
-        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
+        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'} · ${p.matches} match${p.matches===1?'':'es'})</span></div>
         <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}⚽ ${p.assists}🅰${p.cleanSheets?' '+p.cleanSheets+'🧤':''}</span>
       </div>`;}).join(''):'<div class="empty-msg">No public tournament stats yet</div>';
     // The still-live pointer entry (archived:false) only shows in the grid once the organizer
@@ -9308,7 +9350,7 @@ function renderCareer(targetId){
   }
   html+=list.map((p,i)=>`
     <div class="scorer-item">
-      <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link" onclick="showPlayerCard('${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
+      <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link" onclick="showPlayerCard('${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'} · ${p.matches} match${p.matches===1?'':'es'})</span></div>
       <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}⚽ ${p.assists}🅰${p.cleanSheets?' '+p.cleanSheets+'🧤':''}</span>
     </div>`).join('');
   el.innerHTML=html;
@@ -9578,7 +9620,7 @@ function renderSearchResults(){
     html+=playerRows.map(p=>{
       const safe=esc(p.name).replace(/'/g,"\\'");
       return`<div class="scorer-item" style="cursor:pointer" onclick="showPlayerCard('${safe}')">
-        <div><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
+        <div><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'} · ${p.matches} match${p.matches===1?'':'es'})</span></div>
         <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}⚽ ${p.assists}🅰</span>
       </div>`;
     }).join('');
@@ -10657,7 +10699,7 @@ async function showHostPastTournaments(){
       const safe=esc(p.name).replace(/'/g,"\\'");
       return`
       <div class="scorer-item" style="cursor:pointer" onclick="showHostPlayerCard('${safe}')">
-        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'})</span></div>
+        <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'} · ${p.matches} match${p.matches===1?'':'es'})</span></div>
         <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}⚽ ${p.assists}🅰${p.cleanSheets?' '+p.cleanSheets+'🧤':''}</span>
       </div>`;}).join(''):'<div class="empty-msg">No public tournament stats yet</div>';
     const archetypes=computeHostCareerArchetypes(list);
