@@ -4789,6 +4789,35 @@ function snapshotCurrentTournament(){
   return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy,matches,champion};
 }
 
+// Shared by the manual "Save Tournament"/"Save to Archive" flow AND the automatic rescue that
+// runs before a reset would otherwise wipe out unsaved progress (see autoArchiveUnsavedProgress()
+// below) -- both need the exact same push-to-history + flag + sync steps, just with a
+// user-typed label/date vs an auto-generated one.
+function archiveTournamentSnapshot(snap,label,dateStr){
+  const historyId='t'+Date.now()+Math.random().toString(36).slice(2,7);
+  state.tournamentHistory=state.tournamentHistory||[];
+  // visibility is tracked locally too (mirroring whatever gets published to hostProfiles)
+  // so the Archive tab can show/change it later without an extra network round-trip -- null
+  // means this tournament was never shared with followers at all (no active shared session).
+  state.tournamentHistory.push({
+    id:historyId,
+    date:dateStr,
+    label:label,
+    ...snap,
+    visibility:sharedMeta?(sharedMeta.visibility||'public'):'public',
+    savedAt:Date.now()
+  });
+  // This live tournament's stats are now duplicated inside tournamentHistory -- flag it so
+  // Career/leaderboard math stops also counting the still-live data on top of the archive
+  // entry we just created (see computeCareerLeaderboard()'s comment for the bug this fixes).
+  state.careerSnapshotSaved=true;
+  saveState();
+  renderArchive();
+  publishArchivedTournamentToFollowers(historyId,label,dateStr,snap);
+  syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+  syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===historyId)).catch(e=>console.error('Could not sync verified contributions:',e));
+  return historyId;
+}
 function saveTournamentToHistory(){
   const snap=snapshotCurrentTournament();
   if(!snap.playerStats.length&&!snap.table.some(t=>t.p>0)){
@@ -4799,32 +4828,26 @@ function saveTournamentToHistory(){
   const defaultLabel=snap.teamNames.join(' vs ');
   showThemedPrompt('Name this tournament (shown in the Archive):',defaultLabel,(label)=>{
     showThemedPrompt('Date played (YYYY-MM-DD):',todayStr,(dateStr)=>{
-      const historyId='t'+Date.now()+Math.random().toString(36).slice(2,7);
-      const finalLabel=label.trim()||defaultLabel;
-      state.tournamentHistory=state.tournamentHistory||[];
-      // visibility is tracked locally too (mirroring whatever gets published to hostProfiles)
-      // so the Archive tab can show/change it later without an extra network round-trip -- null
-      // means this tournament was never shared with followers at all (no active shared session).
-      state.tournamentHistory.push({
-        id:historyId,
-        date:(dateStr.trim()||todayStr),
-        label:finalLabel,
-        ...snap,
-        visibility:sharedMeta?(sharedMeta.visibility||'public'):'public',
-        savedAt:Date.now()
-      });
-      // This live tournament's stats are now duplicated inside tournamentHistory -- flag it so
-      // Career/leaderboard math stops also counting the still-live data on top of the archive
-      // entry we just created (see computeCareerLeaderboard()'s comment for the bug this fixes).
-      state.careerSnapshotSaved=true;
-      saveState();
-      renderArchive();
+      archiveTournamentSnapshot(snap,label.trim()||defaultLabel,dateStr.trim()||todayStr);
       alert('Tournament saved to the Archive.');
-      publishArchivedTournamentToFollowers(historyId,finalLabel,(dateStr.trim()||todayStr),snap);
-      syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
-      syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===historyId)).catch(e=>console.error('Could not sync verified contributions:',e));
     });
   });
+}
+// Rescues unsaved ratings/stats from being lost when Reset Tournament/Reset Match would
+// otherwise wipe them out -- runs automatically right before a reset, with an auto-generated
+// label/date (team names + today) instead of interrupting the reset with the two name/date
+// prompts saveTournamentToHistory() normally asks for. A no-op if there's nothing played yet, or
+// if this exact live match was already saved manually (careerSnapshotSaved already true) --
+// never creates a duplicate Archive entry for the same match. Returns true if it actually
+// rescued something, so the caller can mention it in its own confirmation message.
+function autoArchiveUnsavedProgress(){
+  if(state.careerSnapshotSaved)return false;
+  const snap=snapshotCurrentTournament();
+  if(!snap.playerStats.length&&!snap.table.some(t=>t.p>0))return false;
+  const todayStr=new Date().toISOString().slice(0,10);
+  const defaultLabel=snap.teamNames.join(' vs ');
+  archiveTournamentSnapshot(snap,defaultLabel,todayStr);
+  return true;
 }
 
 // Logs a single match played somewhere NOT tracked in this app (a pickup game, a league that
@@ -11270,7 +11293,8 @@ function saveTeamNames(){
 }
 
 function resetAll(){
-  showThemedConfirm("Reset all match data and team names for the current format? This cannot be undone. (The player position database and saved tournament history are kept.) Tip: use Save Tournament in the Archive tab first if you want to keep this tournament's ratings and synergy.",()=>{
+  showThemedConfirm("Reset all match data and team names for the current format? This cannot be undone. (The player position database and saved tournament history are kept. Any unsaved ratings from matches already played are automatically archived first, so nothing is lost.)",()=>{
+    const rescued=autoArchiveUnsavedProgress();
     const n=state.numTeams,legs=state.legs;
     const fmt=state.formatType||'league';
     const oldPlayerDB=state.playerDB||[];
@@ -11318,6 +11342,7 @@ function resetAll(){
     ensureShape(); // backfills any field not explicitly carried over above (e.g. rsvp, which is
                    // intentionally left out here -- a full reset starts a fresh guest list)
     saveState();renderAll();
+    if(rescued)alert('Your unsaved ratings were automatically saved to the Archive before resetting.');
   });
 }
 
