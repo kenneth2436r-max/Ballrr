@@ -9484,8 +9484,9 @@ function renderSearchResults(){
       </div>`).join('');
     html+='</div>';
   }
-  html+='<div id="verified-search-results"></div>';
-  el.innerHTML=html||('<div class="empty-msg">No matches for "'+esc(q)+'"</div>');
+  const noLocalMatchesMsg=html?'':('<div class="empty-msg">No matches for "'+esc(q)+'"</div>');
+  html+=noLocalMatchesMsg+'<div id="verified-search-results"></div>';
+  el.innerHTML=html;
   // Universal (cross-account) verified player search -- separate from the local playerRows
   // above since it's a real network round-trip (searchVerifiedPlayers()), not a client-side
   // filter of already-loaded local data. Rendered into its own sub-container so it can arrive
