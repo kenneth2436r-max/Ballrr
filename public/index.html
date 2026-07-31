@@ -9039,6 +9039,7 @@ function archiveEntryHtml(t){
         </div>`).join('')}`:''}
       ${t.note?`<div class="customko-hint" style="margin-top:8px">${esc(t.note)}</div>`:''}
       <button onclick="openArchivedVisibilityControl('${t.id}')" style="width:100%;padding:9px;background:#fff;border:1px solid var(--btn-bg);border-radius:8px;color:var(--btn-bg);font-size:12px;font-weight:600;cursor:pointer;margin-top:10px">👥 Followers: change visibility</button>
+      <button onclick="toggleHideFromProfileGrid('${t.id}')" style="width:100%;padding:9px;background:#fff;border:1px solid var(--btn-bg);border-radius:8px;color:var(--btn-bg);font-size:12px;font-weight:600;cursor:pointer;margin-top:10px">${t.hiddenFromProfileGrid?'👁 Show on my Profile grid':'🙈 Hide from my Profile grid'}</button>
       <button onclick="deleteHistoryEntry('${t.id}')" style="width:100%;padding:9px;background:#fff;border:1px solid #e24b4a;border-radius:8px;color:#a32d2d;font-size:12px;font-weight:600;cursor:pointer;margin-top:10px">Delete this entry</button>
     `:''}
   </div>`;
@@ -9527,11 +9528,27 @@ function highlightsStripHtml(list,onclickForEntry){
       <div class="highlight-circle-label">${esc((t.label||'Tournament').slice(0,12))}</div>
     </div>`).join('')}</div>`;
 }
+// Toggles a purely LOCAL, purely cosmetic flag -- hides one saved tournament from the tiled
+// "post grid" on THIS device's own Profile tab, nothing else. Deliberately does NOT touch
+// state.tournamentHistory's contribution to anything else: it still shows in the Archive tab's
+// full list, still counts toward Career stats/ratings/the balanced draft, and has zero effect on
+// setArchivedTournamentVisibility()'s FOLLOWER-facing public/private toggle -- those are two
+// unrelated concerns (what you see of your own stuff vs what other people following you can see)
+// that happened to get conflated with a single "I don't want it on my profile" request. This one
+// only ever changes what THIS device's own Profile grid renders.
+function toggleHideFromProfileGrid(id){
+  const entry=(state.tournamentHistory||[]).find(t=>t.id===id);
+  if(!entry)return;
+  entry.hiddenFromProfileGrid=!entry.hiddenFromProfileGrid;
+  saveState();
+  renderArchive();
+  renderProfileGrid();
+}
 function renderProfileGrid(){
   const el=document.getElementById('profile-grid-container');
   const stripEl=document.getElementById('profile-highlights-strip');
   if(!el)return;
-  const history=(state.tournamentHistory||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
+  const history=(state.tournamentHistory||[]).filter(t=>!t.hiddenFromProfileGrid).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
   if(stripEl)stripEl.innerHTML=highlightsStripHtml(history,t=>"openProfileEntry('"+t.id+"')");
   if(!history.length){
     el.innerHTML='<div class="empty-msg" style="grid-column:1/-1">No tournaments saved yet -- save one from the Create menu once you finish it</div>';
