@@ -182,8 +182,11 @@ test('showHostPastTournaments lists both live sessions and individually-archived
   assert.ok(html.includes('Session 3 (live)'));
   assert.ok(html.includes('Tournament from session 2'));
   assert.ok(html.includes('Second tournament in session 1'));
-  assert.ok(html.includes('First tournament in session 1'));
-  assert.ok(html.includes('🔒'), 'the private entry should still show a lock hint');
+  // Regression test for: "that button doesn't work, the tournament is still visible on my
+  // profile" -- a private archived entry used to still show its tile (label + a lock hint),
+  // only the tap-through DETAIL was gated. Fixed so a private entry is fully excluded from the
+  // grid itself, matching what choosing "private" actually means to someone using it.
+  assert.ok(!html.includes('First tournament in session 1'), 'a private entry must not appear in the grid at all, not just be locked');
 });
 
 // Regression test for: "the followers still just see a tournament no longer available pop up".
@@ -460,7 +463,11 @@ test('showHostPastTournaments renders the host\'s profile as a Career leaderboar
   assert.ok(html.includes('Archive'), 'an Archive section should be present, separate from Career');
   assert.ok(html.includes('Densil'), 'the public tournament\'s player should show up in the Career leaderboard');
   assert.ok(html.includes('Summer Cup'), 'the public tournament should still be listed in the Archive section');
-  assert.ok(html.includes('Private Cup'), 'the private tournament should still be listed in the Archive section (just without contributing to Career)');
+  // A private tournament must not appear in the Archive grid at all -- see the matching fix in
+  // previewHostProfile()/showHostPastTournaments() (the grid used to still show its tile with
+  // just a lock hint, which is what prompted this fix: a private entry should be fully hidden
+  // from the follower-facing profile, not visible-but-locked).
+  assert.ok(!html.includes('Private Cup'), 'the private tournament must not be listed in the Archive section at all');
 });
 
 // Regression test for: "the stats showing for the follower is all wrong" -- root cause was 2 of

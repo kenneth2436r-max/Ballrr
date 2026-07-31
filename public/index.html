@@ -7058,13 +7058,22 @@ async function previewHostProfile(rawCode){
       </div>`;}).join(''):'<div class="empty-msg">No public tournament stats yet</div>';
     // The still-live pointer entry (archived:false) only shows in the grid once the organizer
     // has actually flipped the "Go live" toggle (liveAnnounced) -- see toggleLiveAnnounced()'s
-    // comment. Archived (saved) tournaments always show regardless.
-    const visibleList=list.filter(t=>t.archived||(d.liveAnnounced&&t.code===d.latestCode));
+    // comment. Archived (saved) tournaments used to always show regardless of visibility (only
+    // the detailed snapshot was gated, via viewHostPastTournament()'s snapshot check) -- fixed so
+    // a tournament marked private via setArchivedTournamentVisibility() is fully excluded from
+    // the grid itself, not just visible-but-locked, matching what "private" actually means to
+    // someone choosing it (this specific match shouldn't appear on my profile at all), and
+    // matching computeHostCareerLeaderboard()'s own filter just below, which already silently
+    // excludes private entries (no snapshot -- see its own comment) from the follower-visible
+    // stats. A tournament can still always be found via the plain Follow/View flow if the
+    // organizer is still actively sharing it live (that's a separate, still-active session, not
+    // this archived-profile view).
+    const visibleList=list.filter(t=>(t.archived&&t.visibility!=='private')||(d.liveAnnounced&&t.code===d.latestCode));
     const gridHtml=visibleList.length?visibleList.map(t=>`
       <div class="profile-tile" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">
         <span class="profile-tile-icon">${t.archived?'🏆':'🔴'}</span>
         <div class="profile-tile-label">${esc(t.label||'Tournament')}</div>
-        <div class="profile-tile-date">${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' 🔒':''}</div>
+        <div class="profile-tile-date">${new Date(t.startedAt).toLocaleDateString()}</div>
       </div>`).join(''):'<div class="empty-msg" style="grid-column:1/-1">Nothing shared yet</div>';
     const highlightsHtml=highlightsStripHtml(list,t=>"viewHostPastTournament('"+t.code+"','"+t.visibility+"','"+(t.historyId||'')+"')");
     const followBtn=alreadyFollowing
@@ -7075,7 +7084,7 @@ async function previewHostProfile(rawCode){
       ${liveNowBannerHtml(d)}
       <div class="profile-stats-bar">${streakBadgeHtml(streak)}
         <div class="profile-stats-row">
-          <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
+          <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${visibleList.length}</div><div class="profile-stat-label">Tournaments</div></div>
           <div class="profile-stat" onclick="switchHostProfilePill('career')"><div class="profile-stat-num">${fullLeaderboard.length}</div><div class="profile-stat-label">Players</div></div>
           <div class="profile-stat" onclick="showHostTrophies()"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
           <div class="profile-stat" onclick="showHostFollowersList()"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
@@ -10664,13 +10673,17 @@ async function showHostPastTournaments(){
     // click target as before, just tiled instead of stacked.
     // The still-live pointer entry (archived:false) only shows in the grid once the organizer
     // has actually flipped the "Go live" toggle (liveAnnounced) -- see toggleLiveAnnounced()'s
-    // comment. Archived (saved) tournaments always show regardless.
-    const visibleList=list.filter(t=>t.archived||(profData.liveAnnounced&&t.code===profData.latestCode));
+    // comment. Archived (saved) tournaments used to always show regardless of visibility -- see
+    // the matching fix + comment in previewHostProfile() above for why a private entry is now
+    // fully excluded here too, not just visible-but-locked (this is the OTHER of the two nearly
+    // identical profile-rendering paths: this one for a host you already follow, the other for
+    // previewing one by code before following -- both had the same gap).
+    const visibleList=list.filter(t=>(t.archived&&t.visibility!=='private')||(profData.liveAnnounced&&t.code===profData.latestCode));
     const gridHtml=visibleList.length?visibleList.map(t=>`
       <div class="profile-tile" onclick="viewHostPastTournament('${t.code}','${t.visibility}','${t.historyId||''}')">
         <span class="profile-tile-icon">${t.archived?'🏆':'🔴'}</span>
         <div class="profile-tile-label">${esc(t.label||'Tournament')}</div>
-        <div class="profile-tile-date">${new Date(t.startedAt).toLocaleDateString()}${t.visibility==='private'?' 🔒':''}</div>
+        <div class="profile-tile-date">${new Date(t.startedAt).toLocaleDateString()}</div>
       </div>`).join(''):'<div class="empty-msg" style="grid-column:1/-1">Nothing shared yet</div>';
     const highlightsHtml=highlightsStripHtml(list,t=>"viewHostPastTournament('"+t.code+"','"+t.visibility+"','"+(t.historyId||'')+"')");
     el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>
@@ -10678,7 +10691,7 @@ async function showHostPastTournaments(){
       ${liveNowBannerHtml(profData)}
       <div class="profile-stats-bar">${streakBadgeHtml(streak)}
         <div class="profile-stats-row">
-          <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${list.length}</div><div class="profile-stat-label">Tournaments</div></div>
+          <div class="profile-stat" onclick="switchHostProfilePill('grid')"><div class="profile-stat-num">${visibleList.length}</div><div class="profile-stat-label">Tournaments</div></div>
           <div class="profile-stat" onclick="switchHostProfilePill('career')"><div class="profile-stat-num">${fullLeaderboard.length}</div><div class="profile-stat-label">Players</div></div>
           <div class="profile-stat" onclick="showHostTrophies()"><div class="profile-stat-num">${trophyCount}</div><div class="profile-stat-label">Trophies</div></div>
           <div class="profile-stat" onclick="showHostFollowersList()"><div class="profile-stat-num">${followerCount}</div><div class="profile-stat-label">Followers</div></div>
