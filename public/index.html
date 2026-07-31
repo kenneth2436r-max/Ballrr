@@ -1692,14 +1692,26 @@ fbAuth.onAuthStateChanged(user=>{
   // real name behind them, so there's nothing meaningful to verify.
   if(!user.isAnonymous)ensureVerifiedIdentity().catch(e=>console.error('Could not ensure verified identity:',e));
   showAuthGate('Loading your tournaments…','loading');
+  // Every one of these four functions is written to always end in a real load (see their own
+  // comments), but that guarantee only holds for errors they already anticipate -- a genuinely
+  // unexpected throw/rejection anywhere in their call chain (a network blip, a Firestore error
+  // shape none of the try/catches match, etc) would otherwise propagate as an unhandled rejection
+  // and leave the gate stuck on "Loading your tournaments..." forever with no way out for the
+  // visitor. This top-level .catch() is the actual last-resort backstop: whatever goes wrong,
+  // fall back to the visitor's own private tournament rather than leave them staring at a loading
+  // screen that will never resolve.
+  const stuckGateFallback=(label)=>(e)=>{
+    console.error(label+' failed unexpectedly, falling back to your own tournament:',e);
+    loadPrivateTournament();
+  };
   if(pendingCheckinCode){
-    consumePendingCheckin();
+    consumePendingCheckin().catch(stuckGateFallback('Check-in link'));
   }else if(pendingFollowCode){
-    consumePendingFollow();
+    consumePendingFollow().catch(stuckGateFallback('Follow link'));
   }else if(pendingFollowHostCode){
-    consumePendingFollowHost();
+    consumePendingFollowHost().catch(stuckGateFallback('Follow-host link'));
   }else if(pendingJoinCode){
-    consumePendingJoin();
+    consumePendingJoin().catch(stuckGateFallback('Join link'));
   }else{
     const code=getActiveSharedCode();
     if(code)loadSharedTournament(code);
@@ -11492,6 +11504,22 @@ function handleHardwareBack(){
 }
 if(window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.App){
   window.Capacitor.Plugins.App.addListener('backButton',handleHardwareBack);
+  // App Links (see AndroidManifest.xml's autoVerify intent-filter) only get Android as far as
+  // routing a tapped https:// link to THIS app instead of the browser -- Capacitor's own bridge
+  // still just loads whatever capacitor.config.json's server.url is (no query params) on cold
+  // start, and does nothing at all if the app was already running in the background, since the
+  // webview's on-screen URL never changes on its own when a new intent arrives. Without this
+  // listener, tapping a follow/join/checkin link would correctly open Ballrr but land on a plain
+  // home screen with the ?follow=/?join=/?checkin= param silently dropped -- functionally
+  // indistinguishable from "the link didn't work". Capacitor's App plugin fires 'appUrlOpen' with
+  // the actual incoming URL every time (fresh launch or already-running), so just navigating the
+  // webview there re-runs this same page from scratch and re-triggers captureCheckinParamFromUrl()
+  // + the normal auth-gate flow exactly like a genuine cold launch of that link would.
+  window.Capacitor.Plugins.App.addListener('appUrlOpen',(data)=>{
+    try{
+      if(data&&data.url)window.location.href=data.url;
+    }catch(e){console.error('Could not handle incoming app link:',e);}
+  });
 }
 function showTab(name,el){
   pushTabHistory(name);
