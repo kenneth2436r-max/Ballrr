@@ -227,6 +227,39 @@ service cloud.firestore {
       );
     }
 
+    // Universal player search: a truly global, cross-account player card, but ONLY for players
+    // who've linked their tracked name to their own real host code (see getPlayerLinkedCode()/
+    // linkPlayerProfile() in the app) -- this is what keeps two unrelated people who happen to
+    // share a common name from getting silently merged into one wrong combined profile the way a
+    // plain name-string match would. {uid} here is the VERIFIED person's own uid (the owner of
+    // the linked host code), not the contributing organizer.
+    match /verifiedPlayers/{uid} {
+      // Readable by anyone signed in -- this is the whole point, a global lookup.
+      allow read: if request.auth != null;
+      // Writable by ANY signed-in user (not just uid's own owner) -- an organizer who just
+      // resolved this uid's real hostProfile while linking a tracked player's name to it needs
+      // to be able to create/refresh this pointer doc too, not just the verified person
+      // themselves. Trusted to only ever write self-consistent {uid,...} data (uid must match
+      // the doc id) -- worst case from a bad-faith write is a stale/wrong display name here,
+      // never anything more sensitive, and self-corrects the next time the real owner's own
+      // client loads their profile.
+      allow write: if request.auth != null && request.resource.data.uid == uid;
+
+      // One doc per (contributing account, tournament) pair -- doc id is
+      // '{contributingUid}_{tournamentId}', which is what makes this airtight: a signed-in user
+      // can only ever create/update the docs that embed their OWN uid as the contributor, for a
+      // tournament they're the one actually saving. Nobody can forge a contribution as if it
+      // came from someone else's account, and nobody can overwrite another organizer's
+      // contribution for the same tournament.
+      match /contributions/{contributionId} {
+        allow read: if request.auth != null;
+        allow create, update: if request.auth != null &&
+          contributionId == (request.auth.uid + '_' + request.resource.data.tournamentId) &&
+          request.resource.data.contributingUid == request.auth.uid;
+        allow delete: if request.auth != null && request.auth.uid == resource.data.contributingUid;
+      }
+    }
+
     // Client-side error log fallback for browser/web users (Crashlytics has no web SDK, and
     // this app deliberately avoids Cloud Functions/Analytics billing -- see the notification
     // system for the same tradeoff). Write-only: the app never reads this back, so there's no

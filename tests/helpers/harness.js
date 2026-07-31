@@ -83,25 +83,43 @@ function makeFirebaseMock(dbStore){
       collection: (sub) => collectionRef(p + '/' + sub)
     };
   }
-  // Minimal collection reference: .doc(id) (used everywhere) plus a .where(field,'==',value).get()
-  // (used for reactions -- one tiny doc per reaction under hostProfiles/{uid}/reactions, counted
-  // via a query instead of mutating a shared array). Only '==' is implemented since that's the
-  // only operator the app actually uses; dbStore is flat (key = full path), so "documents in this
-  // collection" just means keys that start with prefix+'/' and have no further '/' after that.
+  // Minimal collection reference: .doc(id), a plain .get() (every doc directly under this
+  // collection), and .where(field,op,value) supporting '==', '>=', '<=' -- chainable (each
+  // .where() call narrows further, same as the real SDK), used both for one-tiny-doc-per-item
+  // patterns (reactions, verifiedPlayers/{uid}/contributions) and simple prefix-range searches
+  // (verifiedPlayers' nameLower >= / <= query). dbStore is flat (key = full path), so "documents
+  // in this collection" just means keys that start with prefix+'/' and have no further '/' after.
   function collectionRef(prefix){
-    return {
-      doc: (id) => docRef(prefix + '/' + id),
-      where: (field, op, value) => ({
+    function docsUnderPrefix(filters){
+      const head = prefix + '/';
+      return Object.keys(dbStore)
+        .filter(k => k.startsWith(head) && !k.slice(head.length).includes('/'))
+        .filter(k => {
+          const d = dbStore[k];
+          if(!d) return false;
+          return filters.every(({ field, op, value }) => {
+            const actual = d[field];
+            if(op === '==') return actual === value;
+            if(op === '>=') return actual >= value;
+            if(op === '<=') return actual <= value;
+            throw new Error('mock only supports ==, >=, <= queries, got: ' + op);
+          });
+        })
+        .map(k => ({ id: k.slice(head.length), data: () => dbStore[k] }));
+    }
+    function queryRef(filters){
+      return {
+        where: (field, op, value) => queryRef([...filters, { field, op, value }]),
         get: () => {
-          if(op !== '==') return Promise.reject(new Error('mock only supports == queries'));
-          const head = prefix + '/';
-          const docs = Object.keys(dbStore)
-            .filter(k => k.startsWith(head) && !k.slice(head.length).includes('/'))
-            .filter(k => dbStore[k] && dbStore[k][field] === value)
-            .map(k => ({ id: k.slice(head.length), data: () => dbStore[k] }));
+          const docs = docsUnderPrefix(filters);
           return Promise.resolve({ docs, size: docs.length, empty: docs.length === 0 });
         }
-      })
+      };
+    }
+    return {
+      doc: (id) => docRef(prefix + '/' + id),
+      get: () => queryRef([]).get(),
+      where: (field, op, value) => queryRef([{ field, op, value }])
     };
   }
   let authCb = null;

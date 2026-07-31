@@ -114,3 +114,28 @@ test('syncNowFromCloud reports how many new tournaments were pulled in from the 
 
   assert.ok(r.lastAlert.includes('2 tournaments'), `expected alert to mention pulling in 2 tournaments, got: ${r.lastAlert}`);
 });
+
+test('syncNowFromCloud also retroactively re-checks every saved tournament against the universal player search', async () => {
+  // Covers the "existing player signs up later" case: syncVerifiedContributionsForHistory()
+  // only runs automatically when a NEW tournament is first saved, so an already-tracked player
+  // who verifies their name afterward needs this button to catch up on OLDER tournaments too.
+  const dbStore = {};
+  dbStore['tournaments/hostUid'] = { data: JSON.stringify({ tournamentHistory: [] }), updatedAt: 1 };
+  dbStore['verifiedPlayers/samUid'] = { uid:'samUid', name:'Samuel', nameLower:'samuel' };
+  const { window } = freshWindow({ dbStore });
+  runInOneEval(window, `
+    currentUser = { uid:'hostUid', displayName:'Aaryan' };
+    state = { tournamentHistory: [
+      { id:'old-tournament', playerStats:[ { name:'Samuel', avg:7, count:2, goals:1, assists:0, cleanSheets:0 } ] }
+    ] };
+    window.__testDone = (async () => {
+      await syncNowFromCloud();
+      for(let i = 0; i < 20; i++) await new Promise(res => setTimeout(res, 0));
+    })();
+  `);
+  await window.__testDone;
+
+  const contrib = dbStore['verifiedPlayers/samUid/contributions/hostUid_old-tournament'];
+  assert.ok(contrib, 'an already-saved tournament should retroactively contribute once the player is verified');
+  assert.strictEqual(contrib.playerStats.goals, 1);
+});

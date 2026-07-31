@@ -45,13 +45,16 @@ test('effectiveTournamentHistory unions local state.tournamentHistory with the c
     ratingPoolHistory = [ { id:'shared1' }, { id:'pool-only' } ];
     window.__results.ids = effectiveTournamentHistory().map(t => t.id).sort();
   `);
-  assert.deepStrictEqual(r.ids, ['local1', 'pool-only', 'shared1']);
+  // Array.from(): jsdom's Array constructor differs from this test file's own realm, so
+  // assert.deepStrictEqual fails on an otherwise-identical array unless normalized first (see
+  // helpers/harness.js's own comment on this).
+  assert.deepStrictEqual(Array.from(r.ids), ['local1', 'pool-only', 'shared1']);
 });
 
 test('playerCareerAvg reads from the pool too, so a player with no local history but pool history still gets a real average', () => {
   const { window } = freshWindow();
   const r = runInOneEval(window, `
-    state = { tournamentHistory: [] };
+    state = { tournamentHistory: [], results: [] };
     ratingPoolHistory = [ { id:'p1', playerStats:[ { name:'Akhil', avg:8, count:2 } ] } ];
     window.__results.avg = playerCareerAvg('Akhil');
     window.__results.unknown = playerCareerAvg('Nobody');

@@ -46,14 +46,17 @@ test('activeDraftPool excludes inactive players from the pool without removing t
     window.__results.active = activeDraftPool();
     window.__results.fullPoolUntouched = state.playerPool.slice();
   `);
-  assert.deepStrictEqual(r.active, ['Sam', 'Jason'], 'Robin is inactive and should be excluded from the draw');
-  assert.deepStrictEqual(r.fullPoolUntouched, ['Sam', 'Robin', 'Jason'], 'the underlying pool array itself must be untouched -- chips/removal still work normally');
+  // Array.from(): jsdom's Array constructor differs from this test file's own realm, so
+  // assert.deepStrictEqual fails on an otherwise-identical array unless normalized first (see
+  // helpers/harness.js's own comment on this).
+  assert.deepStrictEqual(Array.from(r.active), ['Sam', 'Jason'], 'Robin is inactive and should be excluded from the draw');
+  assert.deepStrictEqual(Array.from(r.fullPoolUntouched), ['Sam', 'Robin', 'Jason'], 'the underlying pool array itself must be untouched -- chips/removal still work normally');
 });
 
 test('marking a player inactive does not affect their already-recorded career stats', () => {
   const { window } = freshWindow();
   const r = runInOneEval(window, `
-    state = { careerSnapshotSaved:true, playerDB:[ { name:'Sam', positions:['MID'], inactive:true } ],
+    state = { careerSnapshotSaved:true, results:[], playerDB:[ { name:'Sam', positions:['MID'], inactive:true } ],
       tournamentHistory: [ { id:'t1', playerStats:[ { name:'Sam', avg:8, count:3, goals:2, assists:1, cleanSheets:0 } ] } ] };
     ratingPoolHistory = [];
     window.__results.avg = playerCareerAvg('Sam');

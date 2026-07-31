@@ -907,7 +907,7 @@ select option{background:var(--input-bg);color:var(--text)}
     <button id="settings-signin-btn" onclick="document.getElementById('auth-gate').style.display='flex';showAuthGate('Sign in to sync your tournaments across devices','signedout');" style="width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;margin-bottom:6px">Sign in to sync</button>
     <button id="settings-signout-btn" onclick="doSignOut()" style="display:none;width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer;margin-bottom:6px">Sign out</button>
     <button id="settings-syncnow-btn" onclick="syncNowFromCloud()" style="display:none;width:100%;padding:10px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;font-weight:600;cursor:pointer">🔄 Sync Archive now</button>
-    <p id="settings-syncnow-hint" style="display:none;font-size:11px;color:var(--text-faint);margin-top:6px">If a tournament you saved on another device isn't showing up here, tap this -- it pulls in anything from the cloud this device is missing, and pushes back a merged, complete history so both devices end up in sync. Safe to use any time.</p>
+    <p id="settings-syncnow-hint" style="display:none;font-size:11px;color:var(--text-faint);margin-top:6px">If a tournament you saved on another device isn't showing up here, tap this -- it pulls in anything from the cloud this device is missing, and pushes back a merged, complete history so both devices end up in sync. Also re-checks every saved tournament against the universal player search, so a player who's since signed up gets credited for tournaments you saved before they did. Safe to use any time.</p>
   </div>
   <div class="edit-section">
     <div class="edit-title">Match Day Weather</div>
@@ -1410,6 +1410,14 @@ async function syncNowFromCloud(){
     await savePrivateStateToCloudMerged();
     const after=(state.tournamentHistory||[]).length;
     renderAll();
+    // Also re-push EVERY saved tournament (not just newly-added ones) through the universal
+    // player search -- this is what actually lets an already-tracked player catch up once they
+    // sign in later: syncVerifiedContributionsForHistory() only ever runs automatically at the
+    // moment a NEW tournament is saved, so anyone who signs up (or gets manually linked, or gets
+    // their tracked name corrected to match) after older tournaments already exist needs this
+    // retroactive re-check to pick those up. Cheap to re-run (idempotent, keyed by tournament id
+    // per contributor) and best-effort -- never blocks reporting the Archive sync above.
+    syncVerifiedContributionsForHistory(state.tournamentHistory||[]).catch(e=>console.error('Could not refresh verified contributions:',e));
     alert(after>before
       ? `Synced! Pulled in ${after-before} tournament${after-before===1?'':'s'} from the cloud that this device didn't have -- your Archive now has ${after} total.`
       : `Synced -- this device already had everything from the cloud (${after} tournament${after===1?'':'s'}).`);
@@ -1678,6 +1686,11 @@ fbAuth.onAuthStateChanged(user=>{
   currentUser=user;
   const __fc=nativeCrashlyticsPlugin();
   if(__fc)__fc.setUserId({userId:user.uid}).catch(()=>{});
+  // Every REAL (non-anonymous) signed-in user automatically gets a verified identity for the
+  // universal player search -- no separate "become a host" step needed (see
+  // ensureVerifiedIdentity()'s own comment). Anonymous sessions (pure view/follow links) have no
+  // real name behind them, so there's nothing meaningful to verify.
+  if(!user.isAnonymous)ensureVerifiedIdentity().catch(e=>console.error('Could not ensure verified identity:',e));
   showAuthGate('Loading your tournaments…','loading');
   if(pendingCheckinCode){
     consumePendingCheckin();
@@ -1815,6 +1828,122 @@ function effectiveTournamentHistory(){
   if(!ratingPoolHistory.length)return local;
   const ids=new Set(local.map(t=>t.id));
   return local.concat(ratingPoolHistory.filter(t=>t&&t.id&&!ids.has(t.id)));
+}
+
+/* ---- Universal (cross-account) verified player search --------------------------------------
+ * See firestore.rules' verifiedPlayers/{uid} comment for the trust model. Every REAL signed-in
+ * user automatically gets a verified identity (ensureVerifiedIdentity(), called from the
+ * fbAuth.onAuthStateChanged handler) -- no separate "become a host" step needed. A tracked
+ * roster name auto-attributes to a verified account whenever it matches EXACTLY ONE signed-in
+ * user's real name (resolveVerifiedUidByName()) -- the common case, zero extra taps. Two
+ * different real people sharing the exact same name is genuinely ambiguous with no reliable way
+ * to guess between them, so that's left alone (no auto-match) rather than risk attributing to
+ * the wrong stranger; getPlayerLinkedCode()/linkPlayerProfile()'s existing host-code link still
+ * works as a manual override/redirect for exactly that case (or a nickname matching nobody's
+ * real name). {uid} below is always the VERIFIED person's own uid, never the contributing
+ * organizer. verifiedPlayers/{uid} is a small public pointer doc (name, for search-by-name);
+ * verifiedPlayers/{uid}/contributions/{contributingUid_tournamentId} holds one player's stats
+ * from one saved tournament, contributed by whoever organized it. */
+function verifiedPlayerDocRef(uid){return fbDb.collection('verifiedPlayers').doc(uid);}
+function verifiedContributionDocRef(uid,contributionId){return verifiedPlayerDocRef(uid).collection('contributions').doc(contributionId);}
+// Called once per sign-in (real accounts only, not anonymous view/follow sessions) -- publishes
+// this account's own real Google-verified name as its global identity. Safe to call repeatedly;
+// just refreshes the name in case it changed since last time.
+async function ensureVerifiedIdentity(){
+  if(!currentUser)return;
+  const name=currentUser.displayName||currentUser.email||null;
+  if(!name)return;
+  await verifiedPlayerDocRef(currentUser.uid).set({
+    uid:currentUser.uid,name,nameLower:name.toLowerCase(),updatedAt:Date.now()
+  },{merge:true});
+}
+// Exact (not prefix) name match -- returns a uid only when EXACTLY one verified account has
+// this precise name, null otherwise (nobody, OR more than one real person sharing it, which is
+// exactly the ambiguous case that needs a manual override instead of a guess).
+async function resolveVerifiedUidByName(name){
+  const nameLower=(name||'').trim().toLowerCase();
+  if(!nameLower)return null;
+  const snap=await fbDb.collection('verifiedPlayers').where('nameLower','==',nameLower).get();
+  if(snap.docs.length!==1)return null;
+  return snap.docs[0].data().uid;
+}
+// Best-effort, fire-and-forget: for every playerStats row across the given tournamentHistory
+// entries, resolve which verified account (if any) it belongs to -- a manual link (row.code, see
+// linkPlayerProfile()) always wins when present, otherwise falls back to matching the tracked
+// name against exactly one signed-in account's real name. Publishes/refreshes that row as a
+// contribution under verifiedPlayers/{uid}/contributions. Called right alongside
+// syncRatingPoolWithLocalHistory() at every point a tournament gets added to history
+// (saveTournamentToHistory(), preserveSharedHistoryOnDisband()) -- never blocks the save it's
+// attached to; any failure just means that tournament doesn't show up in the global card yet,
+// nothing local is lost.
+async function syncVerifiedContributionsForHistory(historyEntries){
+  if(!currentUser||!historyEntries||!historyEntries.length)return;
+  for(const t of historyEntries){
+    if(!t||!t.id||!Array.isArray(t.playerStats))continue;
+    for(const p of t.playerStats){
+      if(!p||!p.name)continue;
+      try{
+        let verifiedUid=null;
+        if(p.code){
+          const codeSnap=await hostCodeDocRef(p.code).get();
+          if(codeSnap.exists){
+            verifiedUid=codeSnap.data().uid;
+            const profSnap=await hostProfileDocRef(verifiedUid).get();
+            const verifiedName=(profSnap.exists&&profSnap.data().hostName)||p.name;
+            await verifiedPlayerDocRef(verifiedUid).set({
+              uid:verifiedUid,name:verifiedName,nameLower:verifiedName.toLowerCase(),updatedAt:Date.now()
+            },{merge:true});
+          }
+        }
+        if(!verifiedUid)verifiedUid=await resolveVerifiedUidByName(p.name);
+        if(!verifiedUid)continue;
+        const contributionId=currentUser.uid+'_'+t.id;
+        await verifiedContributionDocRef(verifiedUid,contributionId).set({
+          tournamentId:t.id,contributingUid:currentUser.uid,
+          contributingHostName:currentUser.displayName||currentUser.email||'Organizer',
+          label:t.label||'',date:t.date||'',playerStats:p,updatedAt:Date.now()
+        });
+      }catch(e){console.error('Could not sync verified contribution for',p&&p.name,e);}
+    }
+  }
+}
+// Prefix search (Firestore's "starts with" trick: nameLower >= q AND nameLower <= q+'') --
+// there's no full-text search here, just a simple starts-with match on the lowercased name.
+async function searchVerifiedPlayers(query){
+  const q=(query||'').trim().toLowerCase();
+  if(!q)return[];
+  const snap=await fbDb.collection('verifiedPlayers').where('nameLower','>=',q).where('nameLower','<=',q+'').get();
+  return snap.docs.map(d=>d.data());
+}
+// Aggregates every contribution for a verified uid into one career-leaderboard-shaped row
+// (same fields computeCareerLeaderboard() produces), regardless of which account organized
+// each contributing tournament.
+async function computeVerifiedPlayerCard(verifiedUid){
+  const idxSnap=await verifiedPlayerDocRef(verifiedUid).get();
+  if(!idxSnap.exists)return null;
+  const idx=idxSnap.data();
+  const contribSnap=await verifiedPlayerDocRef(verifiedUid).collection('contributions').get();
+  const agg={name:idx.name,team:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
+  contribSnap.docs.forEach(d=>{
+    const c=d.data();
+    const p=c.playerStats||{};
+    agg.team=p.team||agg.team;
+    agg.goals+=p.goals||0;
+    agg.assists+=p.assists||0;
+    agg.cleanSheets+=p.cleanSheets||0;
+    agg.matchesTotal+=p.count||0;
+    if(p.avg!=null&&p.count){agg.ratingSum+=p.avg*p.count;agg.ratingCount+=p.count;}
+    agg.tournaments+=1;
+    if(Array.isArray(p.matchRatings))agg.matchRatings.push(...p.matchRatings);
+  });
+  return{
+    uid:verifiedUid,name:agg.name,team:agg.team||'Unknown',
+    goals:agg.goals,assists:agg.assists,cleanSheets:agg.cleanSheets,
+    avg:agg.ratingCount?agg.ratingSum/agg.ratingCount:null,
+    matches:agg.matchesTotal,tournaments:agg.tournaments,
+    matchRatings:agg.matchRatings,
+    hostCode:idx.hostCode
+  };
 }
 
 function applySharedMetaSnap(code,snap){
@@ -2627,6 +2756,7 @@ async function preserveSharedHistoryOnDisband(sharedHistory){
   // this is a secondary consistency nicety.
   const poolUid=sharedMeta?sharedMeta.ownerId:currentUser.uid;
   mergeIntoRatingPool(poolUid,sharedHistory).catch(e=>console.error('Could not sync rating pool on disband/copy:',e));
+  syncVerifiedContributionsForHistory(sharedHistory).catch(e=>console.error('Could not sync verified contributions on disband/copy:',e));
 }
 // Lets ANY member (not just the owner) pull a copy of this shared tournament's saved history
 // into their OWN private archive at any point, without ending the session for anyone else.
@@ -3252,9 +3382,15 @@ function togglePlayerInactive(name){
   setPlayerInactive(name,!isPlayerInactive(name));
   renderDraft();
 }
+// Usually not needed: the universal player search (see syncVerifiedContributionsForHistory()'s
+// comment) already auto-matches a tracked name to a real signed-in account whenever it's an
+// exact, unambiguous match -- no linking required for that. This is the manual override for
+// when that doesn't work: two different real people who happen to share this exact name, or a
+// nickname that doesn't match anyone's real Google name. Also still offers a "Visit profile"
+// button on the player card either way.
 function linkPlayerProfile(name){
   const current=getPlayerLinkedCode(name);
-  showThemedPrompt(`Link ${name}'s name to their own host code, so their player card can offer a "Visit profile" button (only works if they've shared a tournament of their own -- ask them for their host code from Settings). Leave blank to unlink.`,current||'',(input)=>{
+  showThemedPrompt(`Only needed if the automatic match got confused -- e.g. two different real people tracked as "${name}", or this is a nickname. Enter the correct person's host code to point this name at them specifically (ask them for it from Settings), or leave blank to remove any override and go back to automatic matching.`,current||'',(input)=>{
     setPlayerLinkedCode(name,input);
     renderDraft();
   });
@@ -4616,6 +4752,7 @@ function saveTournamentToHistory(){
       alert('Tournament saved to the Archive.');
       publishArchivedTournamentToFollowers(historyId,finalLabel,(dateStr.trim()||todayStr),snap);
       syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+      syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===historyId)).catch(e=>console.error('Could not sync verified contributions:',e));
     });
   });
 }
@@ -4650,13 +4787,18 @@ function logExternalMatchEntry(){
           const pos=POSITIONS.includes((posStr||'').trim().toUpperCase())?(posStr.trim().toUpperCase()):'MID';
           showThemedPrompt('Goals you scored:','0',(goalsStr)=>{
             showThemedPrompt('Assists you made:','0',(assistsStr)=>{
-              showThemedPrompt('Rate your own performance (1-10):','7',(ratingStr)=>{
+              showThemedPrompt('Rate your own performance (1-10):','7',async(ratingStr)=>{
                 const goals=Math.max(0,parseInt(goalsStr,10)||0);
                 const assists=Math.max(0,parseInt(assistsStr,10)||0);
                 const rating=Math.min(10,Math.max(1,parseFloat(ratingStr)||7));
                 const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
                 const finalDate=dateStr.trim()||todayStr;
                 const finalVenue=venueStr.trim();
+                // Self-attributed, so it's automatically "verified" for the universal player
+                // search (see verifiedPlayerDocRef()'s comment) -- no manual linking needed,
+                // this IS your own signed-in account's own code.
+                let myCode=null;
+                try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external match:',e);}
                 state.tournamentHistory=state.tournamentHistory||[];
                 state.tournamentHistory.push({
                   id,
@@ -4667,7 +4809,7 @@ function logExternalMatchEntry(){
                   numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
                   playerStats:[{
                     name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
-                    goals,assists,cleanSheets:0,matchRatings:[rating],code:null
+                    goals,assists,cleanSheets:0,matchRatings:[rating],code:myCode
                   }],
                   visibility:'private',
                   savedAt:Date.now()
@@ -4676,6 +4818,7 @@ function logExternalMatchEntry(){
                 renderArchive();
                 alert('Match logged -- it now counts toward your career stats and player card.');
                 syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+                syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
               });
             });
           });
@@ -6235,6 +6378,81 @@ function showHostPlayerCard(name){
       <button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button>
     </div>`;
   document.getElementById('player-card-modal').style.display='flex';
+}
+// Universal (cross-account) player card -- reachable from anyone signed in, via the Search
+// tab's "🌐 Verified Players" results (see renderSearchResults()/searchVerifiedPlayers()).
+// Aggregates every organizer's contribution for this verified uid (computeVerifiedPlayerCard())
+// into the SAME FIFA-card layout showPlayerCard()/showHostPlayerCard() use, just built from a
+// different (cross-account) data source. Async because it's a real network fetch, unlike the
+// two card views above which read already-loaded local/published data -- shows a brief loading
+// state in the modal while that resolves.
+async function showVerifiedPlayerCard(uid){
+  const el=document.getElementById('player-card-content');
+  el.innerHTML='<div class="empty-msg">Loading global card…</div>';
+  document.getElementById('player-card-modal').style.display='flex';
+  let career;
+  try{
+    career=await computeVerifiedPlayerCard(uid);
+  }catch(e){
+    console.error('Could not load verified player card:',e);
+    el.innerHTML='<div class="empty-msg">Could not load this player’s global card. Try again.</div>';
+    return;
+  }
+  if(!career){el.innerHTML='<div class="empty-msg">No verified stats for this player yet.</div>';return;}
+  const d={
+    name:career.name,team:career.team||'Unknown',
+    position:'MID', // no single reliable position across every contributing organizer's own playerDB
+    goals:career.goals,assists:career.assists,cleanSheets:career.cleanSheets,
+    avg:career.avg,matches:career.matches,tournaments:career.tournaments,
+    archetypes:[],achievements:[],trophies:null,
+    form:computeFormFromRatings(career.matchRatings),
+    linkedHostCode:career.hostCode||null
+  };
+  const ovr=calcCardOVR(d);
+  const tier=cardTier(ovr,d);
+  const attrs=computeCardAttributes(d,ovr);
+  el.innerHTML=`
+    <div class="fifa-card ${tier.cls}">
+      <div class="fifa-top">
+        <div class="fifa-ovrpos"><div class="fifa-ovr">${ovr}</div><div class="fifa-pos">${esc(d.position)}</div></div>
+        <div>
+          <div class="fifa-crest">🌐</div>
+          <div class="fifa-tier-tag">${tier.name}</div>
+        </div>
+      </div>
+      <div class="fifa-avatar">🧑‍🦱</div>
+      <div class="fifa-name">${esc(d.name)}</div>
+      <div style="text-align:center;font-size:11px;color:var(--text-faint);margin-top:-6px;margin-bottom:6px">🌐 Verified global card -- combines every organizer's saved stats for this player</div>
+      <div class="fifa-divider"></div>
+      <div class="fifa-attrs">
+        <div class="fifa-attr-col">
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.pac}</span><span class="fifa-attr-lbl">PAC</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.sho}</span><span class="fifa-attr-lbl">SHO</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.pas}</span><span class="fifa-attr-lbl">PAS</span></div>
+        </div>
+        <div class="fifa-attr-col">
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.dri}</span><span class="fifa-attr-lbl">DRI</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.def}</span><span class="fifa-attr-lbl">DEF</span></div>
+          <div class="fifa-attr"><span class="fifa-attr-val">${attrs.phy}</span><span class="fifa-attr-lbl">PHY</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="pc-realstats">
+      <div class="pc-realstat"><span>${d.goals}</span>Goals</div>
+      <div class="pc-realstat"><span>${d.assists}</span>Assists</div>
+      <div class="pc-realstat"><span>${d.cleanSheets}</span>CS</div>
+      <div class="pc-realstat"><span>${d.avg!==null?d.avg.toFixed(1):'--'}</span>Rating</div>
+    </div>
+    <div class="pc-team">${esc(d.team)}${d.matches?' - '+d.matches+' match'+(d.matches===1?'':'es'):''} · ${d.tournaments} tournament${d.tournaments===1?'':'s'} · across every organizer who's saved them</div>
+    ${d.form?`<div class="pc-form pc-form-${d.form.cls}">
+        <span class="pc-form-arrow">${d.form.arrow}</span>
+        <span class="pc-form-label">${esc(d.form.label)}</span>
+        <span class="pc-form-dots">${d.form.dots.map(r=>`<span class="pc-form-dot ${r>=7?'good':r>=5?'mid':'low'}">${r.toFixed(1)}</span>`).join('')}</span>
+      </div>`:''}
+    <div class="pc-actions">
+      ${d.linkedHostCode?`<button class="pc-btn pc-btn-rename" onclick="closePlayerCard();previewHostProfile('${esc(d.linkedHostCode).replace(/'/g,"\\'")}')">👤 Visit profile</button>`:''}
+      <button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button>
+    </div>`;
 }
 function sharePlayerCard(name){
   haptic('tap');
@@ -9266,7 +9484,29 @@ function renderSearchResults(){
       </div>`).join('');
     html+='</div>';
   }
+  html+='<div id="verified-search-results"></div>';
   el.innerHTML=html||('<div class="empty-msg">No matches for "'+esc(q)+'"</div>');
+  // Universal (cross-account) verified player search -- separate from the local playerRows
+  // above since it's a real network round-trip (searchVerifiedPlayers()), not a client-side
+  // filter of already-loaded local data. Rendered into its own sub-container so it can arrive
+  // slightly after the rest of the results without a jarring re-render, and stale results from a
+  // query the person has already changed get silently dropped (the `q` check below) rather than
+  // clobbering whatever they've typed since.
+  if(currentUser){
+    searchVerifiedPlayers(q).then(results=>{
+      const stillCurrent=document.getElementById('search-input')&&(document.getElementById('search-input').value||'').trim().toLowerCase()===q;
+      const container=document.getElementById('verified-search-results');
+      if(!stillCurrent||!container)return;
+      if(!results.length){container.innerHTML='';return;}
+      container.innerHTML='<div class="section-header">🌐 Verified Players</div>'+results.map(v=>{
+        const safe=esc(v.uid).replace(/'/g,"\\'");
+        return`<div class="scorer-item" style="cursor:pointer" onclick="showVerifiedPlayerCard('${safe}')">
+          <div><strong class="player-name-link">${esc(v.name)}</strong> <span style="color:#888;font-size:12px">(host code ${esc(v.hostCode)})</span></div>
+          <span class="g-badge" style="background:#c4e0f7;color:#0a3a52">🌐 Global</span>
+        </div>`;
+      }).join('');
+    }).catch(e=>console.error('Verified player search failed:',e));
+  }
 }
 
 function setTheme(mode){
