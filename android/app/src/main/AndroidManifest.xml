@@ -18,6 +18,23 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!-- Android App Links: without this, the OS has no idea this app can handle
+                 tournament-tracker-f343b.web.app URLs at all, so every shared follow/join link
+                 always opens in the browser even with the app installed. This is the actual fix
+                 for that, not just a preference the user could toggle. android:autoVerify makes
+                 Android check the assetlinks.json file at
+                 https://tournament-tracker-f343b.web.app/.well-known/assetlinks.json (see
+                 public/.well-known/assetlinks.json) at install time to confirm this app is
+                 really authorized for this domain before routing links to it silently. Without a
+                 verified assetlinks.json, the OS falls back to an Open With chooser instead of
+                 skipping straight to the app. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="tournament-tracker-f343b.web.app" />
+            </intent-filter>
         </activity>
 
         <provider

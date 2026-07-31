@@ -917,6 +917,15 @@ select option{background:var(--input-bg);color:var(--text)}
     <div id="shared-container"></div>
   </div>
   <div class="edit-section">
+    <div class="edit-title">Standing Co-Hosts</div>
+    <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">People who automatically become full editors of every tournament YOU create from now on -- no code to send, no approval step, from the moment you create it. One-directional: this doesn't grant you access to THEIR tournaments -- for that, they'd add your host code here on their own device the same way.</p>
+    <div class="edit-row">
+      <input type="text" id="standing-cohost-code-input" placeholder="Their host code" maxlength="6" style="text-transform:uppercase">
+      <button onclick="addStandingCoHost(document.getElementById('standing-cohost-code-input').value);document.getElementById('standing-cohost-code-input').value='';">+ Add</button>
+    </div>
+    <div id="standing-cohosts-container" style="margin-top:8px"></div>
+  </div>
+  <div class="edit-section">
     <div class="edit-title">Default Match Length</div>
     <p style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Every new match starts with this length, so you're not resetting the clock before every kickoff. You can still change one specific match's length from its own timer before it starts.</p>
     <div class="edit-row">
@@ -1303,6 +1312,7 @@ let myLiveAnnounced=false; // this device's own liveAnnounced flag, kept live vi
 // needed so the Profile tab can show a "You're live" banner to the organizer themselves (not
 // just followers via liveNowBannerHtml()), confirming the toggle in Settings actually took.
 let myLatestCode=null,myLatestVisibility=null,myLatestLabel=null;
+let myStandingCoHosts=[]; // this device's own standingCoHosts list, kept live via startMyFollowersListener() -- see addStandingCoHost()
 function getFollowedHost(){
   try{
     const raw=localStorage.getItem(HOST_FOLLOW_KEY);
@@ -1371,7 +1381,7 @@ function startMyFollowersListener(){
   if(myFollowersUnsub){myFollowersUnsub();myFollowersUnsub=null;}
   if(!currentUser)return;
   myFollowersUnsub=hostProfileDocRef(currentUser.uid).onSnapshot(snap=>{
-    if(!snap.exists){myFollowersList=[];myLiveAnnounced=false;myLatestCode=null;myLatestVisibility=null;myLatestLabel=null;renderProfileStats();renderMyLiveBanner();renderSharedSection();return;}
+    if(!snap.exists){myFollowersList=[];myLiveAnnounced=false;myLatestCode=null;myLatestVisibility=null;myLatestLabel=null;myStandingCoHosts=[];renderProfileStats();renderMyLiveBanner();renderSharedSection();renderStandingCoHostsSection();return;}
     const d=snap.data();
     const followers=d.followers||[];
     const names=d.followerNames||{};
@@ -1380,10 +1390,17 @@ function startMyFollowersListener(){
     myLatestCode=d.latestCode||null;
     myLatestVisibility=d.latestVisibility||null;
     myLatestLabel=d.latestLabel||null;
+    myStandingCoHosts=Array.isArray(d.standingCoHosts)?d.standingCoHosts:[];
     renderProfileStats();
     renderMyLiveBanner();
     renderSharedSection();
+    renderStandingCoHostsSection();
   },e=>console.error('My-followers listener failed:',e));
+}
+function renderStandingCoHostsSection(){
+  const el=document.getElementById('standing-cohosts-container');
+  if(!el)return;
+  el.innerHTML=standingCoHostsListHtml(myStandingCoHosts);
 }
 // The organizer's own "You're live" confirmation on their Profile tab -- purely informational
 // (no follow/join action makes sense here, it's their own tournament), just enough to confirm
@@ -1903,6 +1920,25 @@ function startSharingTournament(requireApproval,isPublic,andGoLive){
       if(cloudUnsub){cloudUnsub();cloudUnsub=null;}
       if(sharedPayloadUnsub){sharedPayloadUnsub();sharedPayloadUnsub=null;}
       loadSharedTournament(code);
+      // Standing co-hosts (see addStandingCoHost()): people this host has designated to
+      // automatically be a full editor of EVERY tournament they create, no code exchange, no
+      // approval step, from the very moment it's created -- regardless of requireApproval (that
+      // flag only gates self-service join requests from people who don't already have a standing
+      // arrangement). One-directional and entirely self-controlled: this only ever adds people
+      // THIS host has explicitly listed, on THIS host's own account -- there is no way for anyone
+      // to grant themselves standing access to someone else's future tournaments.
+      try{
+        const coHostSnap=await hostProfileDocRef(currentUser.uid).get();
+        const standingCoHosts=(coHostSnap.exists&&Array.isArray(coHostSnap.data().standingCoHosts))?coHostSnap.data().standingCoHosts:[];
+        if(standingCoHosts.length){
+          const memberNamesPatch={};
+          standingCoHosts.forEach(c=>{memberNamesPatch['memberNames.'+c.uid]=c.name;});
+          await sharedMetaDocRef(code).update({
+            members:firebase.firestore.FieldValue.arrayUnion(...standingCoHosts.map(c=>c.uid)),
+            ...memberNamesPatch
+          });
+        }
+      }catch(e){console.error('Could not add standing co-hosts:',e);}
       // Best-effort: let anyone following this host as a person know a new tournament just
       // went live. A host who's never followable yet (ensureHostCode() sets that up on first
       // use) simply has zero followers to notify -- never blocks the share flow if it fails.
@@ -2219,6 +2255,57 @@ function unfollowHost(){
   });
 }
 
+/* ---------- STANDING CO-HOSTS ----------
+ * A person you've designated to automatically be a full editor of every tournament YOU create
+ * from now on -- no code exchange, no approval step, every time. Stored on your own
+ * hostProfiles/{uid} doc (standingCoHosts: [{uid,name,code}]) and applied in
+ * startSharingTournament() right after a new shared/{code} doc is created. Deliberately
+ * one-directional and entirely self-controlled: adding someone here only affects tournaments
+ * YOU create going forward. It cannot reach back and grant you access to THEIR tournaments --
+ * there's no way to grant yourself standing access to someone else's future data without their
+ * own account adding you the same way, on their own device. If you want it to work both ways,
+ * each person adds the other, once, using each other's host code (Settings -> "My host code").
+ */
+async function addStandingCoHost(rawCode){
+  if(!currentUser){alert('Sign in first.');return;}
+  const code=(rawCode||'').trim().toUpperCase();
+  if(!code)return;
+  try{
+    const codeSnap=await hostCodeDocRef(code).get();
+    if(!codeSnap.exists){alert('No host found with that code. Double-check it with whoever sent it.');return;}
+    const uid=codeSnap.data().uid;
+    if(uid===currentUser.uid){alert("That's your own host code.");return;}
+    await ensureHostCode(); // guarantees this account's own hostProfiles doc exists before merging into it
+    const mySnap=await hostProfileDocRef(currentUser.uid).get();
+    const existing=(mySnap.exists&&Array.isArray(mySnap.data().standingCoHosts))?mySnap.data().standingCoHosts:[];
+    if(existing.some(c=>c.uid===uid)){alert('Already a standing co-host.');return;}
+    const profSnap=await hostProfileDocRef(uid).get();
+    const name=(profSnap.exists&&profSnap.data().hostName)||'Co-host';
+    const next=[...existing,{uid,name,code}];
+    await hostProfileDocRef(currentUser.uid).set({standingCoHosts:next},{merge:true});
+    myStandingCoHosts=next;
+    haptic('success');
+    renderStandingCoHostsSection();
+  }catch(e){console.error('Could not add standing co-host:',e);alert('Could not add: '+(e.message||e));}
+}
+function removeStandingCoHost(uid){
+  if(!currentUser)return;
+  showThemedConfirm('Remove this person as a standing co-host? Tournaments you create after this will no longer automatically include them as an editor.',async()=>{
+    try{
+      const mySnap=await hostProfileDocRef(currentUser.uid).get();
+      const existing=(mySnap.exists&&Array.isArray(mySnap.data().standingCoHosts))?mySnap.data().standingCoHosts:[];
+      const next=existing.filter(c=>c.uid!==uid);
+      await hostProfileDocRef(currentUser.uid).set({standingCoHosts:next},{merge:true});
+      myStandingCoHosts=next;
+      renderStandingCoHostsSection();
+    }catch(e){console.error('Could not remove standing co-host:',e);alert('Could not remove: '+(e.message||e));}
+  });
+}
+function standingCoHostsListHtml(list){
+  if(!list||!list.length)return'<p style="font-size:11px;color:var(--text-faint)">Nobody yet -- add a friend\'s host code above and every tournament you create from then on will automatically include them as an editor.</p>';
+  return list.map(c=>`<div class="ledger-row"><span class="ledger-name">👤 ${esc(c.name)} <span style="color:var(--text-faint);font-size:11px">(${esc(c.code)})</span></span><button class="rem-btn" onclick="removeStandingCoHost('${esc(c.uid).replace(/'/g,"\\'")}')">×</button></div>`).join('');
+}
+
 // Lightweight listener on ONLY the followed host's profile doc (never their full tournament
 // payload) -- watches for latestStartedAt changing, which means "this host just started a new
 // tournament." The first snapshot after attaching only updates the locally-remembered
@@ -2368,6 +2455,26 @@ async function preserveSharedHistoryOnDisband(sharedHistory){
     }
   });
   await docRef.set({data:JSON.stringify(privateState),updatedAt:Date.now()},{merge:true});
+}
+// Lets ANY member (not just the owner) pull a copy of this shared tournament's saved history
+// into their OWN private archive at any point, without ending the session for anyone else.
+// Without this, only the person who eventually disbands ever gets their own permanent copy (see
+// preserveSharedHistoryOnDisband() above) -- a standing co-host who's never the one who disbands
+// would otherwise have their own career/rating history permanently drift out of sync with the
+// tournaments they've actually been co-editing all along.
+async function copySharedHistoryToMyArchive(){
+  if(!sharedMeta||!currentUser)return;
+  if(!(sharedMeta.members||[]).includes(currentUser.uid)){
+    alert('Only editors (members) of this shared tournament can copy its history -- followers only have view access.');
+    return;
+  }
+  const hist=state.tournamentHistory||[];
+  if(!hist.length){alert('Nothing saved to history in this tournament yet.');return;}
+  try{
+    await preserveSharedHistoryOnDisband(hist);
+    haptic('success');
+    alert('Copied '+hist.length+' saved tournament'+(hist.length===1?'':'s')+" into your own Archive -- they'll show up there (and in your own career stats) even after this session ends.");
+  }catch(e){console.error('Could not copy shared history:',e);alert('Could not copy: '+(e.message||e));}
 }
 function disbandSharedTournament(){
   if(!sharedMeta||sharedMeta.ownerId!==currentUser.uid)return;
@@ -10215,6 +10322,8 @@ function renderSharedSection(){
     <button type="button" onclick="showFollowQR()" style="width:100%;background:none;border:none;color:var(--btn-bg);font-size:12px;font-weight:600;cursor:pointer;padding:4px;margin-bottom:10px">Or show QR code to scan in person</button>
     <div class="chip-wrap" style="margin-bottom:10px">${memberChips}</div>
     ${followerChips?`<div class="edit-title" style="margin-top:10px">Following (view only)</div><div class="chip-wrap" style="margin-bottom:10px">${followerChips}</div>`:''}
+    ${isMember?`<button class="theme-btn" style="width:100%;margin-top:10px" onclick="copySharedHistoryToMyArchive()">📋 Copy history to my own Archive</button>
+    <p style="font-size:11px;color:var(--text-faint);margin:4px 0 0">Only whoever eventually disbands this session gets their own permanent copy automatically -- tap this any time to make sure YOUR Archive and career stats stay current too, even if you're not the one who ends it.</p>`:''}
     <button class="pc-btn pc-btn-close" style="width:100%;margin-top:10px" onclick="leaveSharedTournament()">Leave (back to your own tournament)</button>
     ${isOwner?`<button class="pc-btn" style="width:100%;margin-top:8px;background:none;color:#e05252;border:1.5px solid #e05252" onclick="disbandSharedTournament()">Disband tournament for everyone</button>`:''}
     ${renderHostFollowBlock()}
@@ -10227,6 +10336,7 @@ function renderSettings(){
   updateNotificationSettingsUI();
   renderModeButtons();
   renderCueCardSettingsButtons();
+  renderStandingCoHostsSection();
   if(currentUser){
     document.getElementById('account-status').textContent='Signed in as '+(currentUser.displayName||currentUser.email||'your account')+' · synced across devices';
     document.getElementById('settings-signin-btn').style.display='none';
