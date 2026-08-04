@@ -3071,6 +3071,8 @@ function restoreLostJuly29Tournament(){
   seedThirdTournamentHistoryEntry();
   saveState();
   renderArchive();
+  renderCareer();
+  renderProfile();
   alert('Restored: Ryan United vs Shane Madrid vs Jason FC (2026-07-29) is back in your Archive.');
   syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
   syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id==='seed-2026-07-29')).catch(e=>console.error('Could not sync verified contributions:',e));
@@ -4855,6 +4857,14 @@ function archiveTournamentSnapshot(snap,label,dateStr){
   state.careerSnapshotSaved=true;
   saveState();
   renderArchive();
+  // showTab() only toggles which section is visually active -- it never re-renders content, so
+  // without explicitly refreshing these too, the Career tab (and the Profile tab's embedded
+  // Career section, with its archetypes/leaderboard) would keep showing whatever was on screen
+  // the last time renderAll() happened to run, even though a brand new tournament's worth of
+  // stats just landed. This is what made archetypes look "stuck on the same names" -- the
+  // underlying computation was always fresh, the DISPLAY just was not being told to update.
+  renderCareer();
+  renderProfile();
   publishArchivedTournamentToFollowers(historyId,label,dateStr,snap);
   syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
   syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===historyId)).catch(e=>console.error('Could not sync verified contributions:',e));
@@ -4903,6 +4913,12 @@ function autoArchiveUnsavedProgress(){
 // state.myExternalName remembers what name to attribute these to after the first time, so this
 // doesn't re-ask every single time -- it MUST match the exact spelling used elsewhere for your
 // career stats to actually merge into one player instead of splitting into a duplicate name.
+// The rating is no longer typed in by hand -- it's run through the EXACT same
+// computePlayerMatchRating() every in-app tournament/Quick Match match uses (goals, assists,
+// clean sheet, result, all weighted by position), fed by the same kind of scoreline info a
+// tracked match already captures (both sides' final score), so an external match's rating is
+// computed the same way and lands on the same scale as everything else feeding a player's
+// overall performance and player card -- not a separate, inconsistent self-graded number.
 function logExternalMatchEntry(){
   if(!currentUser){alert('Sign in first -- external matches are saved to your account so they count toward your career stats.');return;}
   const todayStr=new Date().toISOString().slice(0,10);
@@ -4920,40 +4936,58 @@ function logExternalMatchEntry(){
       showThemedPrompt('Where/what was this? (e.g. "5-a-side @ Turf Town", "Sunday league vs Riverside"):','',(venueStr)=>{
         showThemedPrompt('Your position this match (GK/DEF/MID/FWD):',getPlayerPosition(state.myExternalName)||'MID',(posStr)=>{
           const pos=POSITIONS.includes((posStr||'').trim().toUpperCase())?(posStr.trim().toUpperCase()):'MID';
-          showThemedPrompt('Goals you scored:','0',(goalsStr)=>{
-            showThemedPrompt('Assists you made:','0',(assistsStr)=>{
-              showThemedPrompt('Rate your own performance (1-10):','7',async(ratingStr)=>{
-                const goals=Math.max(0,parseInt(goalsStr,10)||0);
-                const assists=Math.max(0,parseInt(assistsStr,10)||0);
-                const rating=Math.min(10,Math.max(1,parseFloat(ratingStr)||7));
-                const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
-                const finalDate=dateStr.trim()||todayStr;
-                const finalVenue=venueStr.trim();
-                // Self-attributed, so it's automatically "verified" for the universal player
-                // search (see verifiedPlayerDocRef()'s comment) -- no manual linking needed,
-                // this IS your own signed-in account's own code.
-                let myCode=null;
-                try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external match:',e);}
-                state.tournamentHistory=state.tournamentHistory||[];
-                state.tournamentHistory.push({
-                  id,
-                  date:finalDate,
-                  label:'📍 '+(finalVenue||'Match played elsewhere'),
-                  external:true,
-                  venue:finalVenue||null,
-                  numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
-                  playerStats:[{
-                    name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
-                    goals,assists,cleanSheets:0,matchRatings:[rating],code:myCode
-                  }],
-                  visibility:'private',
-                  savedAt:Date.now()
+          showThemedPrompt('Minutes you played:','90',(minutesStr)=>{
+            const minutesPlayed=Math.max(1,Math.min(180,parseInt(minutesStr,10)||90));
+            showThemedPrompt('Your team\'s final score:','0',(teamScoreStr)=>{
+              const teamScore=Math.max(0,parseInt(teamScoreStr,10)||0);
+              showThemedPrompt('Opponent\'s final score:','0',(oppScoreStr)=>{
+                const oppScore=Math.max(0,parseInt(oppScoreStr,10)||0);
+                showThemedPrompt('Goals you scored:','0',(goalsStr)=>{
+                  showThemedPrompt('Assists you made:','0',async(assistsStr)=>{
+                    const goals=Math.max(0,parseInt(goalsStr,10)||0);
+                    const assists=Math.max(0,parseInt(assistsStr,10)||0);
+                    const cleanSheet=oppScore===0;
+                    const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
+                    // Same engine, same inputs a tracked match's scorers/assists/scoreline would
+                    // produce -- no manual "contrib" stats (tackles/saves/etc) here since this
+                    // quick-entry flow deliberately mirrors the bare-minimum a normal match needs
+                    // (Scorers + a final score), not the optional deeper stat-tracking the Lineup
+                    // tab separately offers for in-app tournaments.
+                    const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,null)*100)/100;
+                    const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
+                    const finalDate=dateStr.trim()||todayStr;
+                    const finalVenue=venueStr.trim();
+                    // Self-attributed, so it's automatically "verified" for the universal player
+                    // search (see verifiedPlayerDocRef()'s comment) -- no manual linking needed,
+                    // this IS your own signed-in account's own code.
+                    let myCode=null;
+                    try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external match:',e);}
+                    state.tournamentHistory=state.tournamentHistory||[];
+                    state.tournamentHistory.push({
+                      id,
+                      date:finalDate,
+                      label:'📍 '+(finalVenue||'Match played elsewhere'),
+                      external:true,
+                      venue:finalVenue||null,
+                      minutesPlayed,
+                      note:`${minutesPlayed} min played · Final score ${teamScore}-${oppScore} (${result}) · Rating auto-calculated from goals/assists/clean sheet, same as an in-app match.`,
+                      numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                      playerStats:[{
+                        name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
+                        goals,assists,cleanSheets:cleanSheet?1:0,matchRatings:[rating],code:myCode
+                      }],
+                      visibility:'private',
+                      savedAt:Date.now()
+                    });
+                    saveState();
+                    renderArchive();
+                    renderCareer();
+                    renderProfile();
+                    alert(`Match logged -- rating auto-calculated at ${rating.toFixed(1)}, now counts toward your career stats and player card.`);
+                    syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+                    syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
+                  });
                 });
-                saveState();
-                renderArchive();
-                alert('Match logged -- it now counts toward your career stats and player card.');
-                syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
-                syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
               });
             });
           });
@@ -5095,6 +5129,10 @@ function deleteHistoryEntry(id){
     state.tournamentHistory=(state.tournamentHistory||[]).filter(t=>t.id!==id);
     saveState();
     renderArchive();
+    // Deleting changes Career/archetypes math too -- see the comment on archiveTournamentSnapshot()
+    // for why this can't rely on switching tabs to pick it up on its own.
+    renderCareer();
+    renderProfile();
     unpublishArchivedTournamentFromFollowers(id);
   });
 }

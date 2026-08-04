@@ -8,6 +8,12 @@
 // external matches are automatically "verified" for the universal player search too -- that
 // makes the whole flow asynchronous, hence the flush-inside-one-eval-call pattern below (see
 // helpers/harness.js's own comment on why driver code and its result reads must share one eval()).
+//
+// The rating is no longer typed in by hand -- it's computed by computePlayerMatchRating(), the
+// exact same engine every in-app tournament/Quick Match match uses, fed by a scoreline (your
+// team's score vs the opponent's) instead of a self-graded number. See computePlayerMatchRating()
+// itself for the weighting formula; the expected values below are hand-derived from it so a
+// regression in either function's logic would actually be caught here.
 const test = require('node:test');
 const assert = require('node:assert');
 const { freshWindow, runInOneEval } = require('./helpers/harness');
@@ -30,7 +36,7 @@ test('logExternalMatchEntry refuses when signed out', () => {
   assert.ok(window.__alertsSeen.some(m => m.includes('Sign in')));
 });
 
-test('logExternalMatchEntry creates a tournamentHistory entry from prompt answers, attributed to the remembered name', async () => {
+test('logExternalMatchEntry creates a tournamentHistory entry from prompt answers, with the rating auto-calculated (not typed in)', async () => {
   const dbStore = {};
   const { window } = freshWindow({ dbStore });
   const r = runInOneEval(window, `
@@ -39,9 +45,11 @@ test('logExternalMatchEntry creates a tournamentHistory entry from prompt answer
       'Date played': '2026-07-20',
       'Where/what': 'Turf Town 5-a-side',
       'position': 'FWD',
+      'Minutes': '90',
+      'team\'s final score': '4',
+      'Opponent\'s final score': '1',
       'Goals': '3',
       'Assists': '1',
-      'Rate your own': '8.5',
     })}
     currentUser = { uid:'myUid', displayName:'Devyanee' };
     sharedMeta = null;
@@ -59,6 +67,7 @@ test('logExternalMatchEntry creates a tournamentHistory entry from prompt answer
   assert.strictEqual(entry.external, true);
   assert.strictEqual(entry.date, '2026-07-20');
   assert.strictEqual(entry.venue, 'Turf Town 5-a-side');
+  assert.strictEqual(entry.minutesPlayed, 90);
   assert.ok(entry.label.includes('Turf Town'));
   assert.strictEqual(entry.playerStats.length, 1);
   const p = entry.playerStats[0];
@@ -66,7 +75,10 @@ test('logExternalMatchEntry creates a tournamentHistory entry from prompt answer
   assert.strictEqual(p.position, 'FWD');
   assert.strictEqual(p.goals, 3);
   assert.strictEqual(p.assists, 1);
-  assert.strictEqual(p.avg, 8.5);
+  // FWD, 3 goals (0.6 each), 1 assist (0.5), win (+0.3), no clean sheet (opponent scored) --
+  // 6.8 + 1.8 + 0.5 + 0.3 = 9.4. Matches computePlayerMatchRating(FWD,3,1,false,1,'win',null).
+  assert.strictEqual(p.avg, 9.4, 'rating must be auto-calculated by computePlayerMatchRating, not asked for as a raw number');
+  assert.strictEqual(p.cleanSheets, 0, 'opponent scored, so no clean sheet');
   assert.strictEqual(p.count, 1);
   assert.strictEqual(r.rememberedName, 'Devyanee');
   // Array.from(): jsdom's Array constructor differs from this test file's own realm, so
@@ -76,7 +88,7 @@ test('logExternalMatchEntry creates a tournamentHistory entry from prompt answer
   assert.ok(p.code, 'should self-attribute its own resolved host code, so it is automatically verified');
 });
 
-test('logExternalMatchEntry reuses state.myExternalName on later calls instead of asking again', async () => {
+test('logExternalMatchEntry credits a clean sheet when the opponent did not score, and reuses state.myExternalName without re-asking', async () => {
   const dbStore = {};
   const { window } = freshWindow({ dbStore });
   const r = runInOneEval(window, `
@@ -84,9 +96,11 @@ test('logExternalMatchEntry reuses state.myExternalName on later calls instead o
       'Date played': '2026-07-21',
       'Where/what': 'Second match',
       'position': 'MID',
+      'Minutes': '90',
+      'team\'s final score': '2',
+      'Opponent\'s final score': '0',
       'Goals': '0',
       'Assists': '0',
-      'Rate your own': '6',
     })}
     let namePromptAsked = false;
     const realPrompt = window.prompt;
@@ -98,15 +112,20 @@ test('logExternalMatchEntry reuses state.myExternalName on later calls instead o
       logExternalMatchEntry();
       for(let i = 0; i < 20; i++) await new Promise(res => setTimeout(res, 0));
       window.__results.namePromptAsked = namePromptAsked;
-      window.__results.entryName = state.tournamentHistory[0].playerStats[0].name;
+      window.__results.entry = state.tournamentHistory[0];
     })();
   `);
   await window.__testDone;
   assert.strictEqual(r.namePromptAsked, false, 'should not re-ask for a name once state.myExternalName is already set');
-  assert.strictEqual(r.entryName, 'Devyanee');
+  const p = r.entry.playerStats[0];
+  assert.strictEqual(p.name, 'Devyanee');
+  assert.strictEqual(p.cleanSheets, 1, 'opponent scored 0, so this should count as a clean sheet');
+  // MID, 0 goals/assists, win (+0.3, not halved -- halving only applies to GK/DEF), clean sheet
+  // bonus for MID (+0.2) -- 6.8 + 0.2 + 0.3 = 7.3.
+  assert.strictEqual(p.avg, 7.3, 'rating must reflect the clean-sheet bonus and result, computed the same way an in-app match would be');
 });
 
-test('an external match entry counts toward computeCareerLeaderboard and playerCareerAvg like any other saved tournament', async () => {
+test('an external match entry counts toward computeCareerLeaderboard and playerCareerAvg like any other saved tournament, using the auto-calculated rating', async () => {
   const dbStore = {};
   const { window } = freshWindow({ dbStore });
   const r = runInOneEval(window, `
@@ -115,9 +134,11 @@ test('an external match entry counts toward computeCareerLeaderboard and playerC
       'Date played': '2026-07-20',
       'Where/what': 'Turf Town',
       'position': 'FWD',
+      'Minutes': '90',
+      'team\'s final score': '4',
+      'Opponent\'s final score': '1',
       'Goals': '3',
       'Assists': '1',
-      'Rate your own': '8',
     })}
     currentUser = { uid:'myUid' };
     sharedMeta = null;
@@ -131,7 +152,7 @@ test('an external match entry counts toward computeCareerLeaderboard and playerC
     })();
   `);
   await window.__testDone;
-  assert.strictEqual(r.avg, 8);
+  assert.strictEqual(r.avg, 9.4);
   assert.ok(r.row);
   assert.strictEqual(r.row.goals, 3);
   assert.strictEqual(r.row.assists, 1);
