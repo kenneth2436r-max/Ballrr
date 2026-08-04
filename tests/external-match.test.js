@@ -53,7 +53,7 @@ test('logExternalMatchEntry creates a tournamentHistory entry from prompt answer
     })}
     currentUser = { uid:'myUid', displayName:'Devyanee' };
     sharedMeta = null;
-    state = { playerDB: [], tournamentHistory: [] };
+    state = { playerDB: [], tournamentHistory: [], results: [] };
     window.__testDone = (async () => {
       logExternalMatchEntry();
       for(let i = 0; i < 20; i++) await new Promise(res => setTimeout(res, 0));
@@ -107,7 +107,7 @@ test('logExternalMatchEntry credits a clean sheet when the opponent did not scor
     window.prompt = (msg, def) => { if(msg.includes('What name')) namePromptAsked = true; return realPrompt(msg, def); };
     currentUser = { uid:'myUid' };
     sharedMeta = null;
-    state = { playerDB: [], tournamentHistory: [], myExternalName: 'Devyanee' };
+    state = { playerDB: [], tournamentHistory: [], results: [], myExternalName: 'Devyanee' };
     window.__testDone = (async () => {
       logExternalMatchEntry();
       for(let i = 0; i < 20; i++) await new Promise(res => setTimeout(res, 0));
@@ -184,7 +184,7 @@ test('logExternalMatchEntry factors in tackles/clearances/key passes for a defen
     })}
     currentUser = { uid:'myUid' };
     sharedMeta = null;
-    state = { playerDB: [], tournamentHistory: [] };
+    state = { playerDB: [], tournamentHistory: [], results: [] };
     window.__testDone = (async () => {
       logExternalMatchEntry();
       for(let i = 0; i < 20; i++) await new Promise(res => setTimeout(res, 0));
@@ -221,7 +221,7 @@ test('logExternalMatchEntry only asks for Saves when the position is GK, and fac
     window.prompt = (msg, def) => { if(msg.includes('Saves')) savesAsked = true; return realPrompt(msg, def); };
     currentUser = { uid:'myUid' };
     sharedMeta = null;
-    state = { playerDB: [], tournamentHistory: [] };
+    state = { playerDB: [], tournamentHistory: [], results: [] };
     window.__testDone = (async () => {
       logExternalMatchEntry();
       for(let i = 0; i < 20; i++) await new Promise(res => setTimeout(res, 0));
@@ -257,7 +257,7 @@ test('logExternalMatchEntry does not ask for Saves at all for a non-goalkeeper',
     window.prompt = (msg, def) => { if(msg.includes('Saves')) savesAsked = true; return realPrompt(msg, def); };
     currentUser = { uid:'myUid' };
     sharedMeta = null;
-    state = { playerDB: [], tournamentHistory: [] };
+    state = { playerDB: [], tournamentHistory: [], results: [] };
     window.__testDone = (async () => {
       logExternalMatchEntry();
       for(let i = 0; i < 20; i++) await new Promise(res => setTimeout(res, 0));
