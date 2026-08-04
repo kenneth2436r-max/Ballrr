@@ -6564,6 +6564,39 @@ function getPlayerCardData(name){
     linkedHostCode:getPlayerLinkedCode(nm)
   };
 }
+// A player with zero real matches recorded anywhere (never played in-app, never logged an
+// external match) has nothing to actually rate them on. calcCardOVR() used to fall back to a
+// "base 50 + a few points per stat" formula for this case, which produced a real-looking Bronze
+// FIFA card (OVR, PAC/SHO/PAS/DRI/DEF/PHY, the works) off entirely zeroed data -- indistinguishable
+// from an actual rated player at a glance. showPlayerCard()/showHostPlayerCard()/
+// showVerifiedPlayerCard() now check this FIRST and render noCardYetHtml() instead whenever it's
+// true, skipping calcCardOVR()/cardTier()/computeCardAttributes() entirely for this case.
+function hasCardStats(d){
+  return !!(d&&d.matches>0);
+}
+// ctaHtml is optional -- only showPlayerCard() (this device's own roster) can offer something
+// actionable ("log a match"); the host/global variants are read-only views of someone else's
+// data, so they just explain why there's nothing to show yet.
+function noCardYetHtml(d,ctaHtml){
+  return`
+    <div class="fifa-card tier-bronze" style="opacity:0.7">
+      <div class="fifa-top">
+        <div class="fifa-ovrpos"><div class="fifa-ovr">0</div><div class="fifa-pos">${esc(d.position||'—')}</div></div>
+        <div><div class="fifa-tier-tag">Unrated</div></div>
+      </div>
+      <div class="fifa-avatar">🧑‍🦱</div>
+      <div class="fifa-name">${esc(d.name)}</div>
+    </div>
+    <div class="pc-realstats">
+      <div class="pc-realstat"><span>0</span>Goals</div>
+      <div class="pc-realstat"><span>0</span>Assists</div>
+      <div class="pc-realstat"><span>0</span>CS</div>
+      <div class="pc-realstat"><span>0</span>Rating</div>
+    </div>
+    <div class="customko-hint" style="margin-top:10px;text-align:center">No matches played or logged yet, so there's nothing to rate -- play a tournament/Quick Match, or log one played elsewhere, to get a real rating and player card.</div>
+    ${ctaHtml||''}
+    <div class="pc-actions"><button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button></div>`;
+}
 function calcCardOVR(d){
   if(d.avg!==null&&d.avg!==undefined)return Math.max(40,Math.min(99,Math.round(d.avg*10)));
   const base=50+d.goals*3+d.assists*2+d.cleanSheets*2;
@@ -6618,12 +6651,17 @@ function cardTier(ovr,d){
 function showPlayerCard(name){
   haptic('tap');
   const d=getPlayerCardData(name);
+  const el=document.getElementById('player-card-content');
+  const safe=esc(d.name).replace(/'/g,"\\'");
+  if(!hasCardStats(d)){
+    el.innerHTML=noCardYetHtml(d,`<div class="pc-actions"><button class="pc-btn" onclick="closePlayerCard();showTab('archive')">\ud83d\udccd Log a match</button></div>`);
+    openPlayerCardModal();
+    return;
+  }
   const ovr=calcCardOVR(d);
   const tier=cardTier(ovr,d);
   const attrs=computeCardAttributes(d,ovr);
   const crest=(d.teamId!==null&&state.teamCrests&&state.teamCrests[d.teamId])?state.teamCrests[d.teamId]:'\u26bd';
-  const el=document.getElementById('player-card-content');
-  const safe=esc(d.name).replace(/'/g,"\\'");
   el.innerHTML=`
     <div class="fifa-card ${tier.cls}">
       <div class="fifa-top">
@@ -6675,7 +6713,23 @@ function showPlayerCard(name){
       <button class="pc-btn pc-btn-rename" onclick="renamePlayerFromCard('${safe}')">\u270f\ufe0f Fix spelling</button>
       <button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button>
     </div>`;
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
+}
+// Shared entry point for showing the #player-card-modal/#player-card-content overlay -- reused
+// by player cards, the archetype ranking list, trophy cabinet, followers list, rivalries, and
+// home stories (over a dozen call sites). Both the outer overlay AND the inner card have their
+// own overflow-y:auto (the card can be taller than the overlay's max-height), and swapping just
+// #player-card-content's innerHTML does NOT reset either element's scroll position on its own --
+// so reopening this modal for a short piece of content right after viewing a long one (e.g. a
+// player with a big Trophy Cabinet) could leave it opening already scrolled past the top,
+// effectively hiding the name/OVR/avatar above the fold. Explicitly resetting scrollTop on both
+// elements every time this opens is what fixes that.
+function openPlayerCardModal(){
+  const modal=document.getElementById('player-card-modal');
+  const content=document.getElementById('player-card-content');
+  modal.style.display='flex';
+  modal.scrollTop=0;
+  content.scrollTop=0;
 }
 function closePlayerCard(){
   document.getElementById('player-card-modal').style.display='none';
@@ -6713,10 +6767,15 @@ function showHostPlayerCard(name){
     form:computeFormFromRatings(career.matchRatings),
     linkedHostCode:career.code||null
   };
+  const el=document.getElementById('player-card-content');
+  if(!hasCardStats(d)){
+    el.innerHTML=noCardYetHtml(d);
+    openPlayerCardModal();
+    return;
+  }
   const ovr=calcCardOVR(d);
   const tier=cardTier(ovr,d);
   const attrs=computeCardAttributes(d,ovr);
-  const el=document.getElementById('player-card-content');
   el.innerHTML=`
     <div class="fifa-card ${tier.cls}">
       <div class="fifa-top">
@@ -6765,7 +6824,7 @@ function showHostPlayerCard(name){
       ${d.linkedHostCode?`<button class="pc-btn pc-btn-rename" onclick="closePlayerCard();previewHostProfile('${esc(d.linkedHostCode).replace(/'/g,"\\'")}')">👤 Visit profile</button>`:''}
       <button class="pc-btn pc-btn-close" onclick="closePlayerCard()">Close</button>
     </div>`;
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 // Universal (cross-account) player card -- reachable from anyone signed in, via the Search
 // tab's "🌐 Verified Players" results (see renderSearchResults()/searchVerifiedPlayers()).
@@ -6777,7 +6836,7 @@ function showHostPlayerCard(name){
 async function showVerifiedPlayerCard(uid){
   const el=document.getElementById('player-card-content');
   el.innerHTML='<div class="empty-msg">Loading global card…</div>';
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
   let career;
   try{
     career=await computeVerifiedPlayerCard(uid);
@@ -6796,6 +6855,10 @@ async function showVerifiedPlayerCard(uid){
     form:computeFormFromRatings(career.matchRatings),
     linkedHostCode:career.hostCode||null
   };
+  if(!hasCardStats(d)){
+    el.innerHTML=noCardYetHtml(d);
+    return;
+  }
   const ovr=calcCardOVR(d);
   const tier=cardTier(ovr,d);
   const attrs=computeCardAttributes(d,ovr);
@@ -9619,7 +9682,7 @@ function teamRivalriesListHtml(records){
 }
 function showMyTeamRivalries(){
   document.getElementById('player-card-content').innerHTML=teamRivalriesListHtml(computeMyTeamRivalries());
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 
 // See computeCareerArchetypes()'s topBy() comment -- populated fresh every renderCareer() call,
@@ -9642,7 +9705,7 @@ function showArchetypeRanking(i){
     <div class="customko-hint" style="margin-bottom:10px">Ranked by the same stat shown below for everyone who qualified (needs the minimum matches/goals/assists for this badge) -- ${esc(a.name)} is on top right now.</div>
     ${rows||'<div class="empty-msg">No other qualifying players yet.</div>'}
     <button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 function renderCareer(targetId){
   const el=document.getElementById(targetId||'career-container');
@@ -9818,11 +9881,11 @@ function followersListHtml(names,title){
 // showHostPlayerCard() already follow.
 function showProfileTrophies(){
   document.getElementById('player-card-content').innerHTML=trophyCabinetListHtml(computeTrophyCabinet(),'🏆 Trophy Cabinet');
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 function showProfileFollowers(){
   document.getElementById('player-card-content').innerHTML=followersListHtml(myFollowersList.map(f=>f.name),'👥 Followers');
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 // Instagram-Highlights-style: a horizontal strip of circular pins above the grid, for whichever
 // saved tournaments the host has starred via toggleTournamentHighlight() (see openProfileEntry()
@@ -10951,7 +11014,7 @@ function computeHostTeamRivalries(pastTournaments){
 function showHostTeamRivalries(){
   const list=lastPastTournamentsList||[];
   document.getElementById('player-card-content').innerHTML=teamRivalriesListHtml(computeHostTeamRivalries(list));
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 // Follower-facing equivalent of computeTrophyCabinet() -- tallies per-tournament Golden
 // Boot/Playmaker/Golden Glove/Player of the Tournament awards, but only across the host's
@@ -11119,11 +11182,11 @@ function switchHostProfilePill(which){
 // preview or "past tournaments" view just fetched, instead of this device's own local state.
 function showHostTrophies(){
   document.getElementById('player-card-content').innerHTML=trophyCabinetListHtml(computeHostTrophyCabinet(lastPastTournamentsList||[]),'🏆 Trophy Cabinet');
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 function showHostFollowersList(){
   document.getElementById('player-card-content').innerHTML=followersListHtml(lastHostFollowerNames||[],'👥 Followers');
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 // historyId is only present for an "archived" (saved) entry -- those render straight from their
 // embedded snapshot (viewArchivedTournamentSnapshot()), completely independent of whether the
@@ -11792,7 +11855,7 @@ function openHomeStory(i){
       <p style="font-size:14px;color:var(--text-muted)">${esc(s.detail)}</p>
     </div>
     <button class="theme-btn" style="width:100%;margin-top:10px" onclick="closePlayerCard()">Close</button>`;
-  document.getElementById('player-card-modal').style.display='flex';
+  openPlayerCardModal();
 }
 
 function renderHome(){
