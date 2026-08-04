@@ -177,9 +177,17 @@ button:active,.tab:active,.chip button:active{transform:scale(0.94)}
    modal is still open) -- without this it sits earlier in the DOM than #recap-modal, so at the
    same z-index it rendered BEHIND it instead of on top, making the card look like it "didn't
    open" even though it had. */
-#player-card-modal{z-index:9999}
+/* align-items:flex-start (overriding .modal-overlay's own align-items:center just for this one
+   modal) + .player-card's own margin:auto 0 below is the classic fix for "centered flexbox
+   modal with tall content becomes unscrollable at the top": with align-items:center, a child
+   taller than the overlay gets centered THEN clipped -- the portion above the vertical midpoint
+   is pushed above scrollTop:0 and is never reachable no matter how you scroll, even after
+   resetting scrollTop to 0 (see openPlayerCardModal()'s own comment -- that JS fix alone wasn't
+   enough). Auto top/bottom margins on the child still center it when it's short enough to fit,
+   but collapse to top-aligned + fully scrollable the moment it doesn't. */
+#player-card-modal{z-index:9999;align-items:flex-start}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-.player-card{width:100%;max-width:300px;max-height:85vh;overflow-y:auto;display:flex;flex-direction:column;align-items:center;animation:cardPop 0.35s cubic-bezier(.34,1.56,.64,1)}
+.player-card{width:100%;max-width:300px;max-height:85vh;overflow-y:auto;display:flex;flex-direction:column;align-items:center;margin:auto 0;animation:cardPop 0.35s cubic-bezier(.34,1.56,.64,1)}
 @keyframes cardPop{0%{opacity:0;transform:scale(0.85) translateY(20px)}100%{opacity:1;transform:scale(1) translateY(0)}}
 .fifa-card{position:relative;width:280px;height:412px;clip-path:polygon(10% 0%,90% 0%,100% 10%,100% 78%,50% 100%,0% 78%,0% 10%);padding:20px 18px 26px;box-shadow:0 20px 50px rgba(0,0,0,0.5);overflow:hidden}
 .fifa-card::before{content:'';position:absolute;top:0;left:-30%;width:60%;height:100%;background:linear-gradient(115deg,rgba(255,255,255,0) 30%,rgba(255,255,255,0.35) 48%,rgba(255,255,255,0) 66%);animation:fifaShine 2.6s ease-in-out infinite;pointer-events:none}
