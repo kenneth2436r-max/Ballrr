@@ -156,7 +156,12 @@ test('an external match entry counts toward computeCareerLeaderboard and playerC
   assert.ok(r.row);
   assert.strictEqual(r.row.goals, 3);
   assert.strictEqual(r.row.assists, 1);
-  assert.strictEqual(r.row.tournaments, 1);
+  // A single logged match (Log External Match) is never a "tournament" for career stats
+  // purposes -- see entryCountsAsTournament() -- it only adds to the match count. Use Log
+  // External Tournament (see tests/external-tournament.test.js) for a multi-match external
+  // event that should count as one.
+  assert.strictEqual(r.row.tournaments, 0);
+  assert.strictEqual(r.row.matches, 1);
 });
 
 // Regression coverage for: "add tackles, blocks, clears, key passes, saves (if keeper) so all

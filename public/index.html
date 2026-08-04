@@ -710,6 +710,7 @@ select option{background:var(--input-bg);color:var(--text)}
   <div class="legend" id="ko-legend"></div>
   <p style="font-size:11px;color:#aaa;margin-top:8px">Tiebreakers: GD → GF → Head-to-Head</p>
   <div id="playoff-odds-container"></div>
+  <div id="end-as-league-container"></div>
   <button class="share-btn" onclick="shareStandings()">📷 Share standings</button>
   </div>
   <div id="knockout-table-container" style="display:none"></div>
@@ -1215,6 +1216,7 @@ function defaultState(){
   return{
     numTeams:n,legs:legs,
     formatType:'league',
+    leagueOnly:false,
     defaultMatchMinutes:90,
     teamNames:defaultNames(n),
     fixtures:genFixtures(n,legs),
@@ -2346,6 +2348,13 @@ function joinSharedTournament(rawCode){
       }catch(e){
         console.error('Failed to join:',e);
         alert('Could not join: '+(e.message||e));
+        // Whatever failed above (a rules rejection, a bad network blip, setActiveSharedCode
+        // already having flipped before a later step threw) must not leave the caller's
+        // "Loading your tournaments..." gate stuck forever with no load ever having fired --
+        // see the big comment above consumePendingJoin(). Always resolve to a real screen.
+        const fallbackCode=getActiveSharedCode();
+        if(fallbackCode)loadSharedTournament(fallbackCode);
+        else loadPrivateTournament();
       }
     };
     if(getActiveSharedCode()){
@@ -2399,6 +2408,11 @@ function followSharedTournament(rawCode){
       }catch(e){
         console.error('Failed to follow:',e);
         alert('Could not follow: '+(e.message||e));
+        // Same reasoning as joinSharedTournament()'s catch above -- never leave the loading
+        // gate stuck just because this particular attempt failed partway through.
+        const fallbackCode=getActiveSharedCode();
+        if(fallbackCode)loadSharedTournament(fallbackCode);
+        else loadPrivateTournament();
       }
     };
     if(getActiveSharedCode()){
@@ -2445,6 +2459,11 @@ function requestFollowApproval(rawCode){
       }catch(e){
         console.error('Failed to request access:',e);
         alert('Could not request access: '+(e.message||e));
+        // Same reasoning as joinSharedTournament()'s catch above -- never leave the loading
+        // gate stuck just because this particular attempt failed partway through.
+        const fallbackCode=getActiveSharedCode();
+        if(fallbackCode)loadSharedTournament(fallbackCode);
+        else loadPrivateTournament();
       }
     };
     if(getActiveSharedCode()){
@@ -3083,6 +3102,7 @@ function ensureShape(){
   if(!state.fixtures)state.fixtures=genFixtures(state.numTeams,state.legs);
   if(!state.results||state.results.length!==state.fixtures.length)state.results=state.fixtures.map(()=>blankMatch());
   if(state.formatType!=='league'&&state.formatType!=='knockout')state.formatType='league';
+  if(typeof state.leagueOnly!=='boolean')state.leagueOnly=false;
   if(typeof state.defaultMatchMinutes!=='number')state.defaultMatchMinutes=90;
   if(state.formatType!=='knockout'&&state.numTeams===3&&!state.page3)state.page3={qualifier:blankMatch(),eliminator:blankMatch(),final:blankMatch()};
   if(state.numTeams>=4&&state.koRounds===undefined)state.koRounds=null;
@@ -3272,7 +3292,11 @@ function renderTable(){
   // (unlike pure knockout, which has no group stage at all to show). customKO's variable,
   // organizer-defined stage list doesn't map cleanly onto either bracket visual, so it keeps
   // pointing at the Knockout tab via the text legend instead.
-  const hybridBracketReady=!isKO&&!(state.customKO&&state.customKO.enabled)&&groupStageComplete();
+  // state.leagueOnly (see toggleLeagueOnly()) is the organizer explicitly declaring the league
+  // table itself as final -- once set, the knockout bracket never auto-appears again, even
+  // though the group stage is complete, and computeTournamentChampion() crowns the table leader
+  // directly instead of waiting on playoff matches that are never going to happen.
+  const hybridBracketReady=!isKO&&!(state.customKO&&state.customKO.enabled)&&!state.leagueOnly&&groupStageComplete();
   const leagueEls=document.getElementById('league-table-elements');
   const koEls=document.getElementById('knockout-table-container');
   if(leagueEls)leagueEls.style.display=isKO?'none':'';
@@ -3295,10 +3319,32 @@ function renderTable(){
   }).join('');
   document.getElementById('ko-legend').innerHTML=koLegendHtml();
   renderPlayoffOdds();
+  const endLeagueEl=document.getElementById('end-as-league-container');
+  if(endLeagueEl)endLeagueEl.innerHTML=endAsLeagueHtml();
   if(hybridBracketReady){
     if(state.numTeams===3)renderPage3TableBracket();
     else renderKnockoutTableBracket();
   }
+}
+
+// Lets the organizer explicitly stop a league-format tournament at the group stage, instead of
+// it automatically expecting a knockout playoff once every match is played (see
+// computeTournamentChampion()'s and renderTable()'s own comments). Only relevant once there's
+// actually a group stage attached to end (pure knockout format has none, and a custom
+// organizer-defined knockout stage list is its own separate thing entirely).
+function endAsLeagueHtml(){
+  if(state.formatType!=='league'||(state.customKO&&state.customKO.enabled))return'';
+  if(!groupStageComplete())return'';
+  if(state.leagueOnly){
+    const leader=calcTable()[0];
+    return`<div class="customko-hint" style="margin-top:10px">🏁 Ended as a league -- the table above is final${leader?', '+esc(leader.name)+' is champion':''}. <button class="theme-btn" style="width:auto;padding:6px 12px;font-size:12px;margin-left:6px" onclick="toggleLeagueOnly()">Resume knockout instead</button></div>`;
+  }
+  return`<div class="customko-hint" style="margin-top:10px">League stage complete -- normally moves on to a knockout playoff below. Want the table to decide it instead? <button class="theme-btn" style="width:auto;padding:6px 12px;font-size:12px;margin-left:6px" onclick="toggleLeagueOnly()">🏁 End as League</button></div>`;
+}
+function toggleLeagueOnly(){
+  state.leagueOnly=!state.leagueOnly;
+  saveState();
+  renderTable();
 }
 
 function koLegendHtml(){
@@ -4727,6 +4773,14 @@ function computeSynergy(){
 // alongside the recap-card champion callout -- table/playerStats alone can't say who actually
 // won a hybrid or knockout tournament, only how the league stage (if any) finished.
 function computeTournamentChampion(){
+  // Organizer explicitly chose to end this as a league, skipping whatever knockout stage would
+  // otherwise follow -- crown the table leader directly instead of waiting on a bracket that's
+  // never going to be played. See toggleLeagueOnly() and the "End as League" button in the Table
+  // tab, which only appears once the league group stage itself is actually complete.
+  if(state.formatType==='league'&&state.leagueOnly){
+    const t=calcTable();
+    return(t.length&&t[0].p>0)?t[0].name:null;
+  }
   if(state.customKO&&state.customKO.enabled){
     const stages=state.customKO.stages;
     if(!stages.length)return null;
@@ -4848,6 +4902,10 @@ function archiveTournamentSnapshot(snap,label,dateStr){
     date:dateStr,
     label:label,
     ...snap,
+    // See entryCountsAsTournament()'s comment -- a save with just one match played (a single
+    // Quick Match game, or a tournament saved after only its first fixture) shouldn't inflate a
+    // player's "tournaments played" count, only their match count.
+    isTournament:Array.isArray(snap.matches)&&snap.matches.length>1,
     visibility:sharedMeta?(sharedMeta.visibility||'public'):'public',
     savedAt:Date.now()
   });
@@ -4990,6 +5048,11 @@ function logExternalMatchEntry(){
                                 minutesPlayed,
                                 note:`${minutesPlayed} min played · Final score ${teamScore}-${oppScore} (${result}) · Rating auto-calculated from goals/assists/clean sheet/match stats, same as an in-app match.`,
                                 numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                                // A single logged match is never a "tournament" for career stats
+                                // purposes (see entryCountsAsTournament()) -- it only adds 1 to
+                                // this player's match count. Use "Log External Tournament" for a
+                                // multi-match external event that should count as one.
+                                isTournament:false,
                                 playerStats:[{
                                   name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
                                   goals,assists,cleanSheets:cleanSheet?1:0,matchRatings:[rating],code:myCode
@@ -5020,6 +5083,128 @@ function logExternalMatchEntry(){
                 });
               });
             });
+          });
+        });
+      });
+    });
+  });
+}
+
+// Logs a whole tournament/mini-league played somewhere NOT tracked in this app (a five-a-side
+// league, a corporate cup, a weekend tournament run by someone else) as ONE tournamentHistory
+// entry covering every match you played in it -- same self-reported, rating-auto-calculated
+// approach as logExternalMatchEntry() above, just looped across N matches and rolled up into a
+// single entry, so it counts as ONE tournament (see entryCountsAsTournament()) rather than N
+// separate matches each individually inflating your tournaments-played count. Position is asked
+// once for the whole event rather than per match, on the assumption most players stick to one
+// role across a single external tournament; goals/assists/minutes/score/contrib stats are still
+// asked per match since those genuinely vary game to game.
+function logExternalTournamentEntry(){
+  if(!currentUser){alert('Sign in first -- external tournaments are saved to your account so they count toward your career stats.');return;}
+  const todayStr=new Date().toISOString().slice(0,10);
+  const askName=(next)=>{
+    if(state.myExternalName){next();return;}
+    showThemedPrompt("What name should these external matches be tracked under? Use the EXACT same spelling as everywhere else in the app so it's the same player, not a duplicate.",currentUser.displayName||'',(nameStr)=>{
+      const name=(nameStr||'').trim();
+      if(!name){alert('A name is required.');return;}
+      state.myExternalName=name;
+      next();
+    });
+  };
+  askName(()=>{
+    showThemedPrompt('What was this tournament/event called? (e.g. "Sunday 5-a-side League", "Corporate Cup"):','',(eventStr)=>{
+      const eventName=(eventStr||'').trim();
+      showThemedPrompt('Date it took place (YYYY-MM-DD):',todayStr,(dateStr)=>{
+        const finalDate=(dateStr||'').trim()||todayStr;
+        showThemedPrompt('Your position for this tournament (GK/DEF/MID/FWD):',getPlayerPosition(state.myExternalName)||'MID',(posStr)=>{
+          const pos=POSITIONS.includes((posStr||'').trim().toUpperCase())?(posStr.trim().toUpperCase()):'MID';
+          showThemedPrompt('How many matches did you play in this tournament?','2',(countStr)=>{
+            const totalMatches=Math.max(1,Math.min(30,parseInt(countStr,10)||2));
+            const acc={goals:0,assists:0,cleanSheets:0,ratings:[],minutes:0};
+            const finishTournament=async()=>{
+              const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
+              const avg=Math.round((acc.ratings.reduce((s,r)=>s+r,0)/acc.ratings.length)*100)/100;
+              let myCode=null;
+              try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external tournament:',e);}
+              state.tournamentHistory=state.tournamentHistory||[];
+              state.tournamentHistory.push({
+                id,
+                date:finalDate,
+                label:'🏆 '+(eventName||'Tournament played elsewhere'),
+                external:true,
+                venue:eventName||null,
+                minutesPlayed:acc.minutes,
+                note:`${totalMatches} match${totalMatches===1?'':'es'} played · ${acc.minutes} min total · Ratings auto-calculated from goals/assists/clean sheet/match stats per match, same as an in-app tournament.`,
+                numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                // Logging multiple matches through this flow is what makes it a genuine
+                // tournament for career stats purposes -- a single match logged this way behaves
+                // the same as Log External Match instead (see entryCountsAsTournament()).
+                isTournament:totalMatches>1,
+                playerStats:[{
+                  name:state.myExternalName,team:null,position:pos,avg,count:totalMatches,
+                  goals:acc.goals,assists:acc.assists,cleanSheets:acc.cleanSheets,matchRatings:acc.ratings.slice(),code:myCode
+                }],
+                visibility:'private',
+                savedAt:Date.now()
+              });
+              saveState();
+              renderArchive();
+              renderCareer();
+              renderProfile();
+              alert(`Tournament logged -- ${totalMatches} match${totalMatches===1?'':'es'}, average rating ${avg.toFixed(1)}, now counts toward your career stats and player card.`);
+              syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+              syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
+            };
+            const askMatch=(i)=>{
+              if(i>totalMatches){finishTournament();return;}
+              const tag=`Match ${i} of ${totalMatches} -- `;
+              showThemedPrompt(tag+'Minutes you played:','90',(minutesStr)=>{
+                acc.minutes+=Math.max(1,Math.min(180,parseInt(minutesStr,10)||90));
+                showThemedPrompt(tag+'Your team\'s final score:','0',(teamScoreStr)=>{
+                  const teamScore=Math.max(0,parseInt(teamScoreStr,10)||0);
+                  showThemedPrompt(tag+'Opponent\'s final score:','0',(oppScoreStr)=>{
+                    const oppScore=Math.max(0,parseInt(oppScoreStr,10)||0);
+                    showThemedPrompt(tag+'Goals you scored:','0',(goalsStr)=>{
+                      showThemedPrompt(tag+'Assists you made:','0',(assistsStr)=>{
+                        const goals=Math.max(0,parseInt(goalsStr,10)||0);
+                        const assists=Math.max(0,parseInt(assistsStr,10)||0);
+                        showThemedPrompt(tag+'Tackles/Interceptions (optional, 0 if not tracked):','0',(tacklesStr)=>{
+                          const tackles=Math.max(0,parseInt(tacklesStr,10)||0);
+                          showThemedPrompt(tag+'Clearances/Blocks (optional, 0 if not tracked):','0',(clearancesStr)=>{
+                            const clearances=Math.max(0,parseInt(clearancesStr,10)||0);
+                            showThemedPrompt(tag+'Key Passes/Chances created (optional, 0 if not tracked):','0',(keyPassesStr)=>{
+                              const keyPasses=Math.max(0,parseInt(keyPassesStr,10)||0);
+                              const afterSaves=(saves)=>{
+                                showThemedPrompt(tag+'Errors leading to a goal (optional, 0 if none):','0',(errorsStr)=>{
+                                  const errors=Math.max(0,parseInt(errorsStr,10)||0);
+                                  const contrib={tackles,clearances,saves,keyPasses,errors};
+                                  const cleanSheet=oppScore===0;
+                                  const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
+                                  const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,contrib)*100)/100;
+                                  acc.goals+=goals;
+                                  acc.assists+=assists;
+                                  if(cleanSheet)acc.cleanSheets+=1;
+                                  acc.ratings.push(rating);
+                                  askMatch(i+1);
+                                });
+                              };
+                              if(pos==='GK'){
+                                showThemedPrompt(tag+'Saves made (optional, 0 if not tracked):','0',(savesStr)=>{
+                                  afterSaves(Math.max(0,parseInt(savesStr,10)||0));
+                                });
+                              }else{
+                                afterSaves(0);
+                              }
+                            });
+                          });
+                        });
+                      });
+                    });
+                  });
+                });
+              });
+            };
+            askMatch(1);
           });
         });
       });
@@ -5109,7 +5294,7 @@ async function publishAllArchivedTournaments(){
     const newEntries=missing.map(t=>({
       code:activeCode,historyId:t.id,label:t.label,startedAt:t.savedAt||Date.now(),dateStr:t.date||'',
       visibility:'public',archived:true,
-      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats,synergy:t.synergy,matches:t.matches||[],champion:t.champion||null}
+      snapshot:{numTeams:t.numTeams,legs:t.legs,teamNames:t.teamNames,table:t.table,playerStats:t.playerStats,synergy:t.synergy,matches:t.matches||[],champion:t.champion||null,isTournament:entryCountsAsTournament(t)}
     }));
     const pastTournaments=[...newEntries,...priorPast].slice(0,40);
     await ref.set({pastTournaments},{merge:true});
@@ -5142,7 +5327,7 @@ async function setArchivedTournamentVisibility(historyId,newVisibility){
       alert("This tournament was never shared with your followers, so there's nothing to change.");
       return;
     }
-    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[],champion:entry.champion||null}:null;
+    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[],champion:entry.champion||null,isTournament:entryCountsAsTournament(entry)}:null;
     const pastTournaments=priorPast.map(t=>t.historyId===historyId?{...t,visibility:newVisibility,snapshot:trimmedSnapshot}:t);
     await ref.set({pastTournaments},{merge:true});
     entry.visibility=newVisibility;
@@ -9190,12 +9375,32 @@ function collapsePlayerStatsByName(playerStats){
     count:row.matches
   }));
 }
+// Whether a saved (or live, still-in-progress) entry represents a genuine multi-match
+// tournament -- something that should count toward a player's "tournaments played" stat -- as
+// opposed to a single stray match (Quick Match used for just one game, or a Log External Match
+// entry), which should only ever add to their match count, never their tournament count. Set
+// explicitly at save time going forward (see archiveTournamentSnapshot()/logExternalMatchEntry()/
+// logExternalTournamentEntry()), so this only ever has to fall back for saves made before this
+// flag existed:
+//  - if it carries a populated top-level matches array (every real in-app tournament/Quick
+//    Match save has one, via snapshotCurrentTournament()), trust it directly: more than 1 match
+//    total means it counts, exactly 1 (or 0) doesn't.
+//  - otherwise (no matches array at all -- a Log External Match entry, or hand-built/legacy
+//    data with no match-level detail recorded), fall back to the historical default of counting
+//    it as a tournament UNLESS it's explicitly flagged external:true (a single logged match).
+function entryCountsAsTournament(t){
+  if(!t)return false;
+  if(t.isTournament!=null)return !!t.isTournament;
+  if(Array.isArray(t.matches)&&t.matches.length)return t.matches.length>1;
+  return !t.external;
+}
 function computeCareerLeaderboard(){
   const agg={};
   // rows here is always ONE tournament's worth, already collapsed to one row per player by
-  // collapsePlayerStatsByName() -- so `tournaments+=1` below is guaranteed to fire at most once
-  // per player per tournament, regardless of how many teams they turned out for that tournament.
-  function mergeTournament(rows){
+  // collapsePlayerStatsByName(). isTournamentEntry (see entryCountsAsTournament()) gates whether
+  // this entry's players get +1 tournament -- a single logged match/game never does, only a
+  // genuine multi-match tournament does -- but every entry always still adds its match count.
+  function mergeTournament(rows,isTournamentEntry){
     rows.forEach(p=>{
       const nm=p.name;
       if(!agg[nm])agg[nm]={name:nm,team:p.team,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0};
@@ -9206,14 +9411,14 @@ function computeCareerLeaderboard(){
       agg[nm].matchesTotal+=p.matches||0;
       agg[nm].ratingSum+=p.ratingSum||0;
       agg[nm].ratingCount+=p.ratingCount||0;
-      agg[nm].tournaments+=1;
+      agg[nm].tournaments+=isTournamentEntry?1:0;
     });
   }
   effectiveTournamentHistory().forEach(t=>{
-    mergeTournament(collapsePlayerStatsByName(t.playerStats));
+    mergeTournament(collapsePlayerStatsByName(t.playerStats),entryCountsAsTournament(t));
   });
   if(!state.careerSnapshotSaved){
-    mergeTournament(collapsePlayerStatsByName(buildLiveCareerRows()));
+    mergeTournament(collapsePlayerStatsByName(buildLiveCareerRows()),allPlayedMatchesWithTeams().length>1);
   }
   return Object.values(agg).map(p=>({
     ...p,
@@ -9278,7 +9483,14 @@ function computeCareerArchetypes(){
     if(!candidates.length)return;
     candidates.sort((a,b)=>scoreFn(b)-scoreFn(a));
     const top=candidates[0];
-    archetypes.push({icon,label,name:top.name,team:top.team,detail:detailFn(top)});
+    archetypes.push({
+      icon,label,name:top.name,team:top.team,detail:detailFn(top),
+      // Full ranked list of everyone who qualified (not just the winner), so tapping the badge
+      // can show exactly why this player holds it instead of someone else with a bigger raw
+      // total -- these are ratio-based (per match), not total-based, which isn't always obvious
+      // from the single winner's own detail line alone. Capped at 8.
+      ranking:candidates.slice(0,8).map(c=>({name:c.name,team:c.team,detail:detailFn(c)}))
+    });
   }
   topBy(p=>p.matches>=2&&p.goals>=2,p=>p.goals/p.matches,'🎯','The Poacher',p=>`${(p.goals/p.matches).toFixed(1)} goals/match`);
   topBy(p=>p.matches>=2&&p.assists>=2,p=>p.assists/p.matches,'🅰️','The Playmaker',p=>`${(p.assists/p.matches).toFixed(1)} assists/match`);
@@ -9410,6 +9622,28 @@ function showMyTeamRivalries(){
   document.getElementById('player-card-modal').style.display='flex';
 }
 
+// See computeCareerArchetypes()'s topBy() comment -- populated fresh every renderCareer() call,
+// read by showArchetypeRanking() below.
+let careerArchetypesCache=[];
+// Shows exactly why a player holds an archetype badge -- the full ranked candidate list, not
+// just the single winner -- since these are ratio-based (per match), not raw-total-based, and
+// "why does X still have this badge when Y has more goals/assists overall" is a genuinely
+// reasonable thing to want to double-check rather than just take on faith.
+function showArchetypeRanking(i){
+  const a=careerArchetypesCache[i];
+  if(!a)return;
+  const rows=(a.ranking||[]).map((c,ri)=>`
+    <div class="scorer-item">
+      <div><span class="rank">${ri+1}.</span> <strong>${esc(c.name)}</strong> <span style="color:#888;font-size:12px">(${esc(c.team||'—')})</span></div>
+      <span style="font-size:12px;color:var(--text-muted)">${esc(c.detail)}</span>
+    </div>`).join('');
+  document.getElementById('player-card-content').innerHTML=`
+    <div class="edit-title" style="margin-bottom:4px">${a.icon} ${esc(a.label)}</div>
+    <div class="customko-hint" style="margin-bottom:10px">Ranked by the same stat shown below for everyone who qualified (needs the minimum matches/goals/assists for this badge) -- ${esc(a.name)} is on top right now.</div>
+    ${rows||'<div class="empty-msg">No other qualifying players yet.</div>'}
+    <button class="theme-btn" style="width:100%;margin-top:14px" onclick="closePlayerCard()">Close</button>`;
+  document.getElementById('player-card-modal').style.display='flex';
+}
 function renderCareer(targetId){
   const el=document.getElementById(targetId||'career-container');
   if(!el)return;
@@ -9421,10 +9655,13 @@ function renderCareer(targetId){
   const medals=['🥇','🥈','🥉'];
   let html='<div class="customko-hint" style="margin-bottom:10px">Combines every match you\'ve played this tournament with everything saved in the Archive — a player\'s all-time record on Ballrr.</div>';
   const archetypes=computeCareerArchetypes();
+  // Cached so showArchetypeRanking(i) below can look up the full ranked candidate list by index
+  // without re-serializing it into an HTML attribute (name/team strings could contain quotes).
+  careerArchetypesCache=archetypes;
   if(archetypes.length){
-    html+='<div class="section-header">Player Archetypes</div>';
-    html+='<div class="badge-strip">'+archetypes.map(a=>`
-      <div class="badge-chip"><span class="badge-icon">${a.icon}</span><div><div class="badge-label">${esc(a.label)}</div><div class="badge-detail">${esc(a.name)} · ${esc(a.detail)}</div></div></div>`).join('')+'</div>';
+    html+='<div class="section-header">Player Archetypes <span style="font-weight:400;font-size:11px;color:var(--text-muted)">(tap a badge to see the full ranking)</span></div>';
+    html+='<div class="badge-strip">'+archetypes.map((a,i)=>`
+      <div class="badge-chip" style="cursor:pointer" onclick="showArchetypeRanking(${i})"><span class="badge-icon">${a.icon}</span><div><div class="badge-label">${esc(a.label)}</div><div class="badge-detail">${esc(a.name)} · ${esc(a.detail)}</div></div></div>`).join('')+'</div>';
     html+='<div class="section-header">All-Time Leaderboard</div>';
   }
   html+=list.map((p,i)=>`
@@ -9446,8 +9683,13 @@ function renderArchive(){
   </div>`;
   html+=`<div class="edit-section">
     <div class="edit-title">Log a Match Played Elsewhere</div>
-    <div class="customko-hint">Played somewhere not tracked in this app -- a pickup game, a league that doesn't use Ballrr, filling in for another team? Log your own performance here so it still counts toward your career stats and player card, same as a tournament run in the app.</div>
+    <div class="customko-hint">Played somewhere not tracked in this app -- a pickup game, a league that doesn't use Ballrr, filling in for another team? Log your own performance here so it still counts toward your career stats and player card, same as a tournament run in the app. This is a single match -- it adds to your match count but not your tournaments-played count.</div>
     <button class="theme-btn" style="width:100%" onclick="logExternalMatchEntry()">📍 Log External Match</button>
+  </div>`;
+  html+=`<div class="edit-section">
+    <div class="edit-title">Log a Tournament Played Elsewhere</div>
+    <div class="customko-hint">Played a whole tournament or mini-league outside the app -- multiple matches, same event? Log each match's stats here the same way, and it's saved as one tournament (counts toward your tournaments-played total, same as one run in the app), not several separate matches.</div>
+    <button class="theme-btn" style="width:100%" onclick="logExternalTournamentEntry()">🏆 Log External Tournament</button>
   </div>`;
   if(!(state.tournamentHistory||[]).some(t=>t.id==='seed-2026-07-29')){
     html+=`<div class="edit-section">
@@ -10051,7 +10293,7 @@ function setTournamentMode(mode){
 function isFriendlyMode(){return state.mode!=='competitive';}
 function snapshotMainSlots(){
   return{
-    numTeams:state.numTeams,legs:state.legs,formatType:state.formatType,teamNames:state.teamNames,teamCrests:state.teamCrests,
+    numTeams:state.numTeams,legs:state.legs,formatType:state.formatType,leagueOnly:!!state.leagueOnly,teamNames:state.teamNames,teamCrests:state.teamCrests,
     fixtures:state.fixtures,results:state.results,page3:state.page3,koRounds:state.koRounds,koThird:state.koThird,
     captains:state.captains,goalkeepers:state.goalkeepers,playerPool:state.playerPool,rotationalPool:state.rotationalPool,players:state.players,
     draftTurnIndex:state.draftTurnIndex,draftBalanced:state.draftBalanced,draftSnake:state.draftSnake,draftPickCount:state.draftPickCount,
@@ -10066,7 +10308,7 @@ function snapshotMainSlots(){
   };
 }
 function restoreMainSlots(snap){
-  state.numTeams=snap.numTeams;state.legs=snap.legs;state.formatType=snap.formatType||'league';state.teamNames=snap.teamNames;state.teamCrests=snap.teamCrests;
+  state.numTeams=snap.numTeams;state.legs=snap.legs;state.formatType=snap.formatType||'league';state.leagueOnly=!!snap.leagueOnly;state.teamNames=snap.teamNames;state.teamCrests=snap.teamCrests;
   state.fixtures=snap.fixtures;state.results=snap.results;state.page3=snap.page3;state.koRounds=snap.koRounds;state.koThird=snap.koThird;
   state.captains=snap.captains;state.goalkeepers=snap.goalkeepers;state.playerPool=snap.playerPool;state.rotationalPool=snap.rotationalPool||[];state.players=snap.players;
   state.draftTurnIndex=snap.draftTurnIndex;state.draftBalanced=snap.draftBalanced;
@@ -10083,7 +10325,7 @@ function switchAppMode(mode){
     if(qm){
       restoreMainSlots(qm);
     }else{
-      state.numTeams=2;state.legs=1;state.formatType='league';
+      state.numTeams=2;state.legs=1;state.formatType='league';state.leagueOnly=false;
       state.teamNames=['Team A','Team B'];state.teamCrests=['',''];
       state.fixtures=[[0,1]];state.results=[blankMatch()];
       state.page3=undefined;state.koRounds=null;state.koThird=undefined;
@@ -10634,7 +10876,7 @@ let lastViewedHostUid=null; // uid behind whatever host profile is currently ope
 // their own unrelated data.
 function computeHostCareerLeaderboard(pastTournaments){
   const agg={};
-  function mergeTournament(rows){
+  function mergeTournament(rows,isTournamentEntry){
     rows.forEach(p=>{
       const nm=p.name;
       if(!agg[nm])agg[nm]={name:nm,team:p.team,position:p.position,code:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
@@ -10647,7 +10889,7 @@ function computeHostCareerLeaderboard(pastTournaments){
       agg[nm].matchesTotal+=p.matches||0;
       agg[nm].ratingSum+=p.ratingSum||0;
       agg[nm].ratingCount+=p.ratingCount||0;
-      agg[nm].tournaments+=1;
+      agg[nm].tournaments+=isTournamentEntry?1:0;
       if(Array.isArray(p.matchRatings))agg[nm].matchRatings.push(...p.matchRatings);
     });
   }
@@ -10657,7 +10899,7 @@ function computeHostCareerLeaderboard(pastTournaments){
     .filter(t=>t.snapshot&&Array.isArray(t.snapshot.playerStats))
     .slice().sort((a,b)=>(a.startedAt||0)-(b.startedAt||0));
   chronological.forEach(t=>{
-    mergeTournament(collapsePlayerStatsByName(t.snapshot.playerStats));
+    mergeTournament(collapsePlayerStatsByName(t.snapshot.playerStats),entryCountsAsTournament(t.snapshot));
   });
   return Object.values(agg).map(p=>({
     ...p,
@@ -11463,6 +11705,7 @@ function resetAll(){
     state={
       numTeams:n,legs:legs,
       formatType:fmt,
+      leagueOnly:false,
       defaultMatchMinutes:oldDefaultMin,
       teamNames:defaultNames(n),
       fixtures:fmt==='knockout'?[]:genFixtures(n,legs),
