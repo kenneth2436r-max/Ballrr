@@ -4919,6 +4919,14 @@ function autoArchiveUnsavedProgress(){
 // tracked match already captures (both sides' final score), so an external match's rating is
 // computed the same way and lands on the same scale as everything else feeding a player's
 // overall performance and player card -- not a separate, inconsistent self-graded number.
+// The optional contribution stats (tackles, clearances/blocks, key passes, saves, errors) are
+// the exact same 5 fields the Lineup tab's "Match Stats" panel asks for on a tracked match (see
+// contribPanelHtml()) -- without these, goals/assists dominate the rating and a defender or
+// keeper who did their job well but never touched the scoresheet reads as "unremarkable" every
+// time. Asking for them here too means every position has a fair path to a standout rating, not
+// just attackers. All default to 0 (skip if you didn't track it) except Saves, which is only
+// asked for goalkeepers -- nobody else's rating is meaningfully affected by it anyway (see
+// computePlayerMatchRating()'s saveW weighting).
 function logExternalMatchEntry(){
   if(!currentUser){alert('Sign in first -- external matches are saved to your account so they count toward your career stats.');return;}
   const todayStr=new Date().toISOString().slice(0,10);
@@ -4943,49 +4951,71 @@ function logExternalMatchEntry(){
               showThemedPrompt('Opponent\'s final score:','0',(oppScoreStr)=>{
                 const oppScore=Math.max(0,parseInt(oppScoreStr,10)||0);
                 showThemedPrompt('Goals you scored:','0',(goalsStr)=>{
-                  showThemedPrompt('Assists you made:','0',async(assistsStr)=>{
+                  showThemedPrompt('Assists you made:','0',(assistsStr)=>{
                     const goals=Math.max(0,parseInt(goalsStr,10)||0);
                     const assists=Math.max(0,parseInt(assistsStr,10)||0);
-                    const cleanSheet=oppScore===0;
-                    const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
-                    // Same engine, same inputs a tracked match's scorers/assists/scoreline would
-                    // produce -- no manual "contrib" stats (tackles/saves/etc) here since this
-                    // quick-entry flow deliberately mirrors the bare-minimum a normal match needs
-                    // (Scorers + a final score), not the optional deeper stat-tracking the Lineup
-                    // tab separately offers for in-app tournaments.
-                    const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,null)*100)/100;
-                    const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
-                    const finalDate=dateStr.trim()||todayStr;
-                    const finalVenue=venueStr.trim();
-                    // Self-attributed, so it's automatically "verified" for the universal player
-                    // search (see verifiedPlayerDocRef()'s comment) -- no manual linking needed,
-                    // this IS your own signed-in account's own code.
-                    let myCode=null;
-                    try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external match:',e);}
-                    state.tournamentHistory=state.tournamentHistory||[];
-                    state.tournamentHistory.push({
-                      id,
-                      date:finalDate,
-                      label:'📍 '+(finalVenue||'Match played elsewhere'),
-                      external:true,
-                      venue:finalVenue||null,
-                      minutesPlayed,
-                      note:`${minutesPlayed} min played · Final score ${teamScore}-${oppScore} (${result}) · Rating auto-calculated from goals/assists/clean sheet, same as an in-app match.`,
-                      numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
-                      playerStats:[{
-                        name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
-                        goals,assists,cleanSheets:cleanSheet?1:0,matchRatings:[rating],code:myCode
-                      }],
-                      visibility:'private',
-                      savedAt:Date.now()
+                    showThemedPrompt('Tackles/Interceptions (optional, 0 if not tracked):','0',(tacklesStr)=>{
+                      const tackles=Math.max(0,parseInt(tacklesStr,10)||0);
+                      showThemedPrompt('Clearances/Blocks (optional, 0 if not tracked):','0',(clearancesStr)=>{
+                        const clearances=Math.max(0,parseInt(clearancesStr,10)||0);
+                        showThemedPrompt('Key Passes/Chances created (optional, 0 if not tracked):','0',(keyPassesStr)=>{
+                          const keyPasses=Math.max(0,parseInt(keyPassesStr,10)||0);
+                          const afterSaves=(saves)=>{
+                            showThemedPrompt('Errors leading to a goal (optional, 0 if none):','0',async(errorsStr)=>{
+                              const errors=Math.max(0,parseInt(errorsStr,10)||0);
+                              const contrib={tackles,clearances,saves,keyPasses,errors};
+                              const cleanSheet=oppScore===0;
+                              const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
+                              // Same engine, same shape of inputs a tracked match's scorers/
+                              // assists/scoreline/Match Stats panel would produce, so an external
+                              // match's rating lands on the same scale and logic as everything
+                              // else feeding a player's overall performance and player card.
+                              const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,contrib)*100)/100;
+                              const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
+                              const finalDate=dateStr.trim()||todayStr;
+                              const finalVenue=venueStr.trim();
+                              // Self-attributed, so it's automatically "verified" for the
+                              // universal player search (see verifiedPlayerDocRef()'s comment) --
+                              // no manual linking needed, this IS your own signed-in account's
+                              // own code.
+                              let myCode=null;
+                              try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external match:',e);}
+                              state.tournamentHistory=state.tournamentHistory||[];
+                              state.tournamentHistory.push({
+                                id,
+                                date:finalDate,
+                                label:'📍 '+(finalVenue||'Match played elsewhere'),
+                                external:true,
+                                venue:finalVenue||null,
+                                minutesPlayed,
+                                note:`${minutesPlayed} min played · Final score ${teamScore}-${oppScore} (${result}) · Rating auto-calculated from goals/assists/clean sheet/match stats, same as an in-app match.`,
+                                numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                                playerStats:[{
+                                  name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
+                                  goals,assists,cleanSheets:cleanSheet?1:0,matchRatings:[rating],code:myCode
+                                }],
+                                visibility:'private',
+                                savedAt:Date.now()
+                              });
+                              saveState();
+                              renderArchive();
+                              renderCareer();
+                              renderProfile();
+                              alert(`Match logged -- rating auto-calculated at ${rating.toFixed(1)}, now counts toward your career stats and player card.`);
+                              syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+                              syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
+                            });
+                          };
+                          if(pos==='GK'){
+                            showThemedPrompt('Saves made (optional, 0 if not tracked):','0',(savesStr)=>{
+                              afterSaves(Math.max(0,parseInt(savesStr,10)||0));
+                            });
+                          }else{
+                            afterSaves(0);
+                          }
+                        });
+                      });
                     });
-                    saveState();
-                    renderArchive();
-                    renderCareer();
-                    renderProfile();
-                    alert(`Match logged -- rating auto-calculated at ${rating.toFixed(1)}, now counts toward your career stats and player card.`);
-                    syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
-                    syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
                   });
                 });
               });
