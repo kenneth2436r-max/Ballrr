@@ -25,7 +25,10 @@ test('openPlayerCardModal resets scroll position on both the overlay and the car
   `);
   assert.strictEqual(r.modalScroll, 0, 'the outer overlay must scroll back to the top on every open, not just the first');
   assert.strictEqual(r.contentScroll, 0);
-  assert.strictEqual(r.display, 'flex');
+  // 'block', not 'flex' -- see openPlayerCardModal()'s own comment: this modal deliberately
+  // does not use flexbox (which was silently reintroducing the tall-card clipping bug via an
+  // inline style beating any CSS override aimed at fixing it).
+  assert.strictEqual(r.display, 'block');
 });
 
 test('showPlayerCard resets a stale scroll position left over from a previous, longer card', () => {

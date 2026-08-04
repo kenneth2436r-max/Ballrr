@@ -93,7 +93,7 @@ test('openHomeStory shows the fact card detail in the shared player-card modal',
     homeStoriesStripHtml();
     openHomeStory(0);
   `);
-  assert.strictEqual(window.document.getElementById('player-card-modal').style.display, 'flex', 'the modal should open');
+  assert.strictEqual(window.document.getElementById('player-card-modal').style.display, 'block', 'the modal should open');
   const content = window.document.getElementById('player-card-content').innerHTML;
   assert.ok(content.length > 0, 'the fact card content should be filled in');
 });

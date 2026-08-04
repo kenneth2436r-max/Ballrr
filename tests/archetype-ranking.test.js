@@ -56,5 +56,5 @@ test('showArchetypeRanking renders the full candidate list (not just the winner)
   `);
   assert.ok(r.html.includes('Keith'), 'the winner should be listed');
   assert.ok(r.html.includes('Densil'), 'the runner-up should ALSO be listed, not just the winner');
-  assert.strictEqual(r.modalShown, 'flex');
+  assert.strictEqual(r.modalShown, 'block');
 });

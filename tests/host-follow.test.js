@@ -322,7 +322,7 @@ test('startMyFollowersListener keeps the Profile tab\'s Followers stat live, and
 
   const listHtml = window.document.getElementById('player-card-content').innerHTML;
   assert.ok(listHtml.includes('Amy') && listHtml.includes('Zed'), 'the follower list should name each follower');
-  assert.strictEqual(window.document.getElementById('player-card-modal').style.display, 'flex');
+  assert.strictEqual(window.document.getElementById('player-card-modal').style.display, 'block');
 });
 
 // Same idea, follower-facing side: previewing a host's profile should let a visitor tap
