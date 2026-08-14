@@ -10708,6 +10708,7 @@ function openProfileEntry(id){
   html+='<div id="profile-entry-reaction"></div>';
   html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="toggleTournamentHighlight('${t.id}')">${t.highlighted?'★ Remove from Highlights':'☆ Add to Highlights'}</button>`;
   html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="shareMyTournamentRecap('${t.id}')">📤 Share recap card</button>`;
+  html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="downloadTournamentReport('${t.id}')">📄 Download Report (PDF)</button>`;
   html+='<button class="theme-btn" style="width:100%;margin-top:8px" onclick="closeProfileEntry()">Close</button>';
   document.getElementById('profile-entry-content').innerHTML=html;
   document.getElementById('profile-entry-modal').style.display='flex';
@@ -13034,6 +13035,40 @@ document.getElementById('cfg-legs').addEventListener('change',updateFormatInfo);
   document.addEventListener('pointerleave',e=>{
     if(pressedEl && e.target===pressedEl) clearPress();
   },{passive:true});
+})();
+
+// Fixes: opening any popup (a themed alert/confirm/prompt, the player card, trophy cabinet,
+// profile entry detail, etc.) while a DIFFERENT one is already open used to render BEHIND it and
+// be completely unclickable, needing the first one closed before the second could be touched at
+// all. Every one of these ~13 overlays shares the same .modal-overlay class and (mostly) the same
+// static z-index -- so with two open at once, which one visually won was decided by DOM source
+// order, not by which was actually opened last, and #player-card-modal's own slightly higher
+// static z-index (see its own CSS comment, from an earlier scrolling fix) made it win against
+// EVERY other overlay regardless of order, including ones opened on top of it afterward (e.g. an
+// error alert triggered by a button inside the player card itself).
+// Rather than touching every individual openXxx()/showXxx() function across the file (there are
+// dozens of `.style.display=` call sites), a single MutationObserver per overlay -- watching for
+// its `style` attribute changing to actually visible -- bumps it to a new highest z-index right
+// then, so whichever popup was shown most recently always wins, automatically, for every current
+// and future modal alike. Inline z-index (set here) always beats the stylesheet's static values
+// (including #player-card-modal's), same "inline beats stylesheet" rule that mattered for the
+// scrolling fix -- so this fully supersedes those static per-modal z-index numbers once a modal
+// has been shown at least once.
+(function(){
+  let topZ=9998;
+  function isVisible(el){
+    const d=el.style.display;
+    return d==='flex'||d==='block';
+  }
+  document.querySelectorAll('.modal-overlay').forEach(el=>{
+    const observer=new MutationObserver(()=>{
+      if(isVisible(el)){
+        topZ+=1;
+        el.style.zIndex=String(topZ);
+      }
+    });
+    observer.observe(el,{attributes:true,attributeFilter:['style']});
+  });
 })();
 </script>
 </body>
