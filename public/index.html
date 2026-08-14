@@ -53,6 +53,26 @@
   --btn-glow:0 0 14px rgba(167,139,250,0.45);
   --accent-soft:rgba(167,139,250,0.16);
 }
+/* Friendly vs Competitive are kept as fully separate environments (different Archive/Career/
+   Profile data -- see entryMode()'s own comment), and need to LOOK unmistakably different too so
+   nobody mistakes which one they're in mid-switch. [data-app-mode] is set on <html> every render
+   (see renderAll()) alongside the existing [data-theme] light/dark attribute, and overrides the
+   same --btn-bg/--btn-glow/--accent-soft variables already threaded through every button, active
+   tab, and the bottom nav's active icon -- so the whole app re-colors instantly, in both light
+   and dark, without needing a second copy of every component's CSS. Friendly keeps the app's
+   original purple (no override needed); Competitive gets a distinct, serious crimson red.  */
+[data-app-mode="competitive"]{
+  --btn-bg:#D6293E;
+  --btn-text:#fff;
+  --btn-glow:0 0 12px rgba(214,41,62,0.35);
+  --accent-soft:rgba(214,41,62,0.10);
+}
+[data-app-mode="competitive"][data-theme="dark"]{
+  --btn-bg:#FF5C72;
+  --btn-text:#2b0509;
+  --btn-glow:0 0 14px rgba(255,92,114,0.45);
+  --accent-soft:rgba(255,92,114,0.16);
+}
 
 *{box-sizing:border-box;margin:0;padding:0}
 .match-card,.ko-card,.result-card,.edit-section,.stage-card,.roster-card,.tab,input,select,textarea,.match-timer,.chip{transition:background 0.2s ease,border-color 0.2s ease,color 0.2s ease}
@@ -105,6 +125,11 @@ h1{font-size:20px;font-weight:600;margin-bottom:4px}
 .app-header{display:flex;align-items:center;gap:12px;margin-bottom:14px}
 .hamburger-btn{flex:none;width:42px;height:42px;border-radius:10px;border:1px solid var(--border);background:var(--card-bg);color:var(--text);font-size:18px;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .app-header-titles{flex:1;min-width:0}
+/* Always-visible, tappable Friendly/Competitive indicator -- color alone (the --btn-bg swap
+   above) isn't enough for someone who's colorblind or just not looking closely, so this spells
+   it out in words too, right in the header where it's impossible to miss regardless of which
+   tab you're on. Tapping it jumps straight to the Settings toggle to switch. */
+.mode-badge{flex:none;padding:6px 10px;border-radius:20px;background:var(--btn-bg);color:var(--btn-text);font-size:11px;font-weight:700;white-space:nowrap;cursor:pointer;-webkit-tap-highlight-color:transparent;box-shadow:var(--btn-glow)}
 .app-header-titles h1{font-size:19px}
 .app-header-titles .sub{margin-bottom:0}
 .current-tab-pill{display:inline-block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px;color:var(--btn-bg);background:var(--accent-soft);border-radius:20px;padding:5px 12px;margin-bottom:14px}
@@ -673,6 +698,7 @@ select option{background:var(--input-bg);color:var(--text)}
     <h1>⚽ Tournament Tracker</h1>
     <p class="sub" id="sub-line">Loading…</p>
   </div>
+  <span class="mode-badge" id="app-mode-badge" onclick="showTab('settings')" title="Tap to switch modes in Settings"></span>
 </div>
 
 <div class="app-mode-row">
@@ -1857,9 +1883,17 @@ async function syncRatingPoolWithLocalHistory(){
 // double-counted.
 function effectiveTournamentHistory(){
   const local=state.tournamentHistory||[];
-  if(!ratingPoolHistory.length)return local;
-  const ids=new Set(local.map(t=>t.id));
-  return local.concat(ratingPoolHistory.filter(t=>t&&t.id&&!ids.has(t.id)));
+  let merged=local;
+  if(ratingPoolHistory.length){
+    const ids=new Set(local.map(t=>t.id));
+    merged=local.concat(ratingPoolHistory.filter(t=>t&&t.id&&!ids.has(t.id)));
+  }
+  // Friendly/Competitive are kept as fully separate environments -- see entryMode()'s comment.
+  // Every stat/career/report function reads tournament history through this one shared choke
+  // point, so filtering once here is what makes all of them consistently agree on which entries
+  // "exist" right now, instead of needing the same check repeated in every individual function.
+  const activeMode=isFriendlyMode()?'friendly':'competitive';
+  return merged.filter(t=>entryMode(t)===activeMode);
 }
 
 /* ---- Universal (cross-account) verified player search --------------------------------------
@@ -1933,7 +1967,12 @@ async function syncVerifiedContributionsForHistory(historyEntries){
         await verifiedContributionDocRef(verifiedUid,contributionId).set({
           tournamentId:t.id,contributingUid:currentUser.uid,
           contributingHostName:currentUser.displayName||currentUser.email||'Organizer',
-          label:t.label||'',date:t.date||'',playerStats:p,updatedAt:Date.now()
+          label:t.label||'',date:t.date||'',playerStats:p,updatedAt:Date.now(),
+          // Friendly/Competitive travels into the universal cross-account card too -- see
+          // entryMode()'s comment; hostViewMode (the same toggle used for a followed host's
+          // profile) gates which of a player's contributions computeVerifiedPlayerCard() below
+          // aggregates, so this stays "the same everywhere" for the global card as well.
+          mode:entryMode(t)
         });
       }catch(e){console.error('Could not sync verified contribution for',p&&p.name,e);}
     }
@@ -1956,7 +1995,12 @@ async function computeVerifiedPlayerCard(verifiedUid){
   const idx=idxSnap.data();
   const contribSnap=await verifiedPlayerDocRef(verifiedUid).collection('contributions').get();
   const agg={name:idx.name,team:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
-  contribSnap.docs.forEach(d=>{
+  // Same environment split as everywhere else -- see entryMode()'s comment -- gated by
+  // hostViewMode, the same "which of the two environments am I currently browsing" toggle a
+  // followed host's profile uses, since this is the same kind of cross-account, follower-facing
+  // view. A contribution synced before this existed has no `mode` field at all -- defaults to
+  // friendly, matching entryMode()'s own default for untagged local history.
+  contribSnap.docs.filter(d=>((d.data().mode==='competitive')?'competitive':'friendly')===hostViewMode).forEach(d=>{
     const c=d.data();
     const p=c.playerStats||{};
     agg.team=p.team||agg.team;
@@ -3386,6 +3430,51 @@ function fullTeamRoster(teamId){
   if(cap&&!drafted.includes(cap))return[...drafted,cap];
   return drafted;
 }
+/* ---------- JERSEY NUMBERS (per tournament, not a permanent player trait) ---------- */
+// A number worn just for THIS tournament -- not a persistent identity like playerDB's position/
+// linked host code, since the same real person can wear a different number on a different team
+// on a different day. Lives directly on the state.players roster entry (the one thing that's
+// already scoped to "this tournament's roster"), and resets naturally with everything else when
+// state resets for a new tournament. Purpose: so a host who already knows every name in advance
+// can still identify who did what DURING a live match by number (what's visible on the pitch),
+// without having to recognize faces/names on the fly -- not a replacement for names, which stay
+// the real underlying identity everywhere else in the app (stats, cards, career history).
+function getPlayerJerseyNumber(name,teamId){
+  const p=state.players.find(x=>x.name===name&&(teamId==null||x.team===teamId));
+  return(p&&p.jerseyNumber!=null)?p.jerseyNumber:null;
+}
+// Label used anywhere a player is picked/listed during live match entry (scorer/assist
+// dropdowns, squad picker, defensive stats tally) -- "#7 Keith" if numbered, otherwise just the
+// name, exactly as before. The underlying value passed around everywhere else (m.scorers[].name,
+// playerStats, etc.) is always still the bare name -- only the on-screen LABEL changes.
+function jerseyLabel(name,teamId){
+  const num=getPlayerJerseyNumber(name,teamId);
+  return num!=null?('#'+num+' '+name):name;
+}
+// Numbered players first (ascending by number, since that's how you'd scan a team sheet),
+// unnumbered players after in their original order -- lets a host who's numbered up the roster
+// scan straight down a dropdown/list by number instead of hunting alphabetically for a name.
+function sortNamesByJersey(names,teamId){
+  return names.map((n,i)=>({n,i,num:getPlayerJerseyNumber(n,teamId)})).sort((a,b)=>{
+    if(a.num!=null&&b.num!=null)return a.num-b.num;
+    if(a.num!=null)return -1;
+    if(b.num!=null)return 1;
+    return a.i-b.i;
+  }).map(x=>x.n);
+}
+function setPlayerJerseyNumber(gi){
+  const p=state.players[gi];
+  if(!p)return;
+  showThemedPrompt('Jersey number for '+p.name+' this tournament (blank to clear):',p.jerseyNumber!=null?String(p.jerseyNumber):'',(val)=>{
+    const trimmed=(val||'').trim();
+    if(!trimmed){delete p.jerseyNumber;saveState();renderAll();return;}
+    const num=parseInt(trimmed,10);
+    if(!Number.isFinite(num)||num<0||num>999){alert('Enter a whole number between 0 and 999, or leave it blank to clear.');return;}
+    p.jerseyNumber=num;
+    saveState();
+    renderAll();
+  });
+}
 // Add a player directly to a team's roster -- for mid-tournament additions (injury cover,
 // a substitute who wasn't part of the original draft, etc.) without going through the wheel.
 function addPlayerToTeamRoster(teamId,name){
@@ -3409,14 +3498,14 @@ function nameFieldHtml(teamId,currentName,kind,ds){
   const permRoster=rosterForTeam(teamId);
   const matchObj=resolveMatchObjForKind(kind,ds);
   const rot=matchObj?getMatchRotational(matchObj,teamId):[];
-  const roster=rot.length?permRoster.concat(rot.filter(n=>!permRoster.includes(n))):permRoster;
+  const roster=sortNamesByJersey(rot.length?permRoster.concat(rot.filter(n=>!permRoster.includes(n))):permRoster,teamId);
   const dsAttrs=Object.keys(ds).map(k=>`data-${k}="${esc(String(ds[k]))}"`).join(' ');
   if(!roster.length){
     return`<input type="text" placeholder="Player name (or leave blank)" value="${esc(currentName)}" data-kind="${kind}" ${dsAttrs} onchange="handleNameText(this)">`;
   }
   const isCustom=!!currentName&&!roster.includes(currentName);
   const opts=['<option value="">Select player</option>']
-    .concat(roster.map(n=>`<option value="${esc(n)}" ${!isCustom&&n===currentName?'selected':''}>${esc(n)}</option>`))
+    .concat(roster.map(n=>`<option value="${esc(n)}" ${!isCustom&&n===currentName?'selected':''}>${esc(jerseyLabel(n,teamId))}</option>`))
     .concat([`<option value="__custom__" ${isCustom?'selected':''}>✎ Custom name…</option>`]).join('');
   return`<div class="name-field">
     <select data-kind="${kind}" ${dsAttrs} onchange="handleNameSelect(this)">${opts}</select>
@@ -3681,12 +3770,12 @@ function squadPickerHtml(kind,matchRef,teamIds,compact){
   if(!matchObj)return'';
   const sides=teamIds.map(teamId=>{
     const oppTeamId=teamIds.find(t=>t!==teamId);
-    const roster=fullTeamRoster(teamId);
+    const roster=sortNamesByJersey(fullTeamRoster(teamId),teamId);
     const squad=getMatchSquad(matchObj,teamId);
     const rot=getMatchRotational(matchObj,teamId);
     const chips=roster.map(name=>{
       const active=squad.includes(name);
-      return`<span class="chip sq-chip${active?' sq-active':''}" onclick="toggleSquadPlayer('${kind}','${matchRef}',${teamId},'${esc(name).replace(/'/g,"\\'")}')">${esc(name)}</span>`;
+      return`<span class="chip sq-chip${active?' sq-active':''}" onclick="toggleSquadPlayer('${kind}','${matchRef}',${teamId},'${esc(name).replace(/'/g,"\\'")}')">${esc(jerseyLabel(name,teamId))}</span>`;
     }).join('');
     const emptyNote=roster.length?'':`<div style="font-size:11px;color:#bbb;margin-bottom:6px">No roster yet -- add a player below or draft one onto ${esc(state.teamNames[teamId])} first.</div>`;
     const rotChips=rot.map(name=>`<span class="chip sq-chip sq-active" title="Rotational -- borrowed for this match only">🔄 ${esc(name)}<button onclick="removeRotationalFromMatch('${kind}','${matchRef}',${teamId},'${esc(name).replace(/'/g,"\\'")}')" title="Remove from this match">×</button></span>`).join('');
@@ -4032,6 +4121,7 @@ function renderMatches(){
       <button class="add-scorer" onclick="promptAddAssist(${mi})">+ Add assist</button>
       ${compact?'':`<button class="add-scorer" id="voice-btn-${mi}" onclick="startVoiceLog(${mi})" style="border-style:dashed">🎤 Voice log</button>`}
       ${squadHtml}
+      ${defStatsPanelHtml('league',mi,r,m)}
       <button class="save-btn" onclick="saveMatch(${mi})">${r.played?'Update result':'Save result (0–0 if no goals)'}</button>
       <div id="toast-${mi}" class="saved-toast">Result saved ✓</div>
       ${r.played?`<button class="share-btn" onclick="shareMatchResult(${mi})">📷 Share result</button>`:''}
@@ -4902,7 +4992,10 @@ function snapshotCurrentTournament(){
   // The overall tournament winner -- see computeTournamentChampion()'s own comment for why this
   // can't be read off the table alone for anything with a knockout stage.
   const champion=computeTournamentChampion();
-  return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy,matches,champion};
+  // mode (friendly/competitive) travels WITH the snapshot -- see entryMode()'s comment. Whatever
+  // this live tournament's mode is at the moment it's saved is permanent for that entry from then
+  // on, exactly like every other stat captured here.
+  return{numTeams:state.numTeams,legs:state.legs,teamNames:state.teamNames.slice(),table,playerStats,synergy,matches,champion,mode:isFriendlyMode()?'friendly':'competitive'};
 }
 
 // Shared by the manual "Save Tournament"/"Save to Archive" flow AND the automatic rescue that
@@ -5066,6 +5159,7 @@ function logExternalMatchEntry(){
                                 minutesPlayed,
                                 note:`${minutesPlayed} min played · Final score ${teamScore}-${oppScore} (${result}) · Rating auto-calculated from goals/assists/clean sheet/match stats, same as an in-app match.`,
                                 numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                                mode:isFriendlyMode()?'friendly':'competitive',
                                 // A single logged match is never a "tournament" for career stats
                                 // purposes (see entryCountsAsTournament()) -- it only adds 1 to
                                 // this player's match count. Use "Log External Tournament" for a
@@ -5154,6 +5248,7 @@ function logExternalTournamentEntry(){
                 minutesPlayed:acc.minutes,
                 note:`${totalMatches} match${totalMatches===1?'':'es'} played · ${acc.minutes} min total · Ratings auto-calculated from goals/assists/clean sheet/match stats per match, same as an in-app tournament.`,
                 numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                mode:isFriendlyMode()?'friendly':'competitive',
                 // Logging multiple matches through this flow is what makes it a genuine
                 // tournament for career stats purposes -- a single match logged this way behaves
                 // the same as Log External Match instead (see entryCountsAsTournament()).
@@ -5345,7 +5440,7 @@ async function setArchivedTournamentVisibility(historyId,newVisibility){
       alert("This tournament was never shared with your followers, so there's nothing to change.");
       return;
     }
-    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[],champion:entry.champion||null,isTournament:entryCountsAsTournament(entry)}:null;
+    const trimmedSnapshot=newVisibility==='public'?{numTeams:entry.numTeams,legs:entry.legs,teamNames:entry.teamNames,table:entry.table,playerStats:entry.playerStats,synergy:entry.synergy,matches:entry.matches||[],champion:entry.champion||null,isTournament:entryCountsAsTournament(entry),mode:entryMode(entry)}:null;
     const pastTournaments=priorPast.map(t=>t.historyId===historyId?{...t,visibility:newVisibility,snapshot:trimmedSnapshot}:t);
     await ref.set({pastTournaments},{merge:true});
     entry.visibility=newVisibility;
@@ -5418,7 +5513,7 @@ async function publishArchivedTournamentToFollowers(historyId,label,dateStr,snap
     const profSnap=await ref.get();
     const priorPast=(profSnap.exists&&Array.isArray(profSnap.data().pastTournaments))?profSnap.data().pastTournaments:[];
     const isPrivate=visibility==='private';
-    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats,synergy:snapshot.synergy,matches:snapshot.matches||[],champion:snapshot.champion||null}:null;
+    const trimmedSnapshot=(snapshot&&!isPrivate)?{numTeams:snapshot.numTeams,legs:snapshot.legs,teamNames:snapshot.teamNames,table:snapshot.table,playerStats:snapshot.playerStats,synergy:snapshot.synergy,matches:snapshot.matches||[],champion:snapshot.champion||null,isTournament:entryCountsAsTournament(snapshot),mode:entryMode(snapshot)}:null;
     const code=sharedMeta?sharedMeta.code:(getActiveSharedCode()||'');
     const entry={code,historyId,label,startedAt:Date.now(),dateStr,visibility,archived:true,snapshot:trimmedSnapshot};
     // Smaller cap than before (40 vs the old 60) -- each entry now carries real tournament data,
@@ -5504,7 +5599,7 @@ function playerCardHtml(name,info,teamId,pos){
       ondrop="handleLineupDrop(event,'${pos}',${teamId})"
       onclick="handleLineupPlayerClick(event,'${safeName}',${teamId},'${pos}')">
     <div class="lp-avatar">${esc(initials(name))}${badge}${statsBtn}</div>
-    <div class="lp-name">${esc(name)}</div>
+    <div class="lp-name">${esc(jerseyLabel(name,teamId))}</div>
     ${sub?`<div class="lp-sub">${sub}</div>`:''}
   </div>`;
 }
@@ -5692,6 +5787,57 @@ function contribPanelHtml(matchObj){
       ${field('errors','Errors leading to a goal',5)}
     </div>
     <button class="add-scorer" onclick="lineupStatsOpenFor=null;renderLineups();">Done</button>
+  </div>`;
+}
+
+/* ---------- LIVE DEFENSIVE-STATS TALLY (Matches/Knockout tabs) -------------------------------
+ * The Lineup tab's Match Stats panel above (contribPanelHtml) is a "fill in the final totals"
+ * form -- great after the fact, but not built for logging an event the instant it happens mid-
+ * match. This is the same underlying data (matchObj.contributions[name][key], same rating
+ * recalculation) with a tap-to-increment interface instead, right on the score-entry card next
+ * to the goal scorers/assists it's meant to sit alongside -- so "the keeper just made a save"
+ * can be logged in one tap, the same way adding a goal scorer is. */
+let defStatsOpenFor=null; // 'league|<mi>' or 'ko|<pathKey>', or null -- only one open at a time
+function toggleDefStatsPanel(kind,ref){
+  const key=kind+'|'+ref;
+  defStatsOpenFor=(defStatsOpenFor===key)?null:key;
+  if(kind==='league')renderMatches();else renderKnockout();
+}
+const DEF_STAT_TALLY_FIELDS=[['tackles','🛡️','Tackle'],['clearances','🧱','Clearance/Block'],['saves','🧤','Save'],['keyPasses','🔑','Key Pass'],['errors','❌','Error']];
+function bumpContribAndRender(kind,ref,name,statKey,delta){
+  const matchObj=kind==='league'?state.results[parseInt(ref,10)]:getMatchObjByPath(ref);
+  if(!matchObj)return;
+  if(!matchObj.contributions)matchObj.contributions={};
+  if(!matchObj.contributions[name])matchObj.contributions[name]={};
+  matchObj.contributions[name][statKey]=Math.max(0,(matchObj.contributions[name][statKey]||0)+delta);
+  saveState();
+  haptic('tap');
+  if(kind==='league')renderMatches();else renderKnockout();
+}
+function defStatsPanelHtml(kind,ref,matchObj,teamIds){
+  const key=kind+'|'+ref;
+  const isOpen=defStatsOpenFor===key;
+  const btn=`<button class="add-scorer" onclick="toggleDefStatsPanel('${kind}','${ref}')" style="border-style:dashed">🛡️ Defensive Stats ${isOpen?'▾':'▸'}</button>`;
+  if(!isOpen)return btn;
+  const sides=teamIds.map(teamId=>{
+    const squad=sortNamesByJersey(getMatchSquad(matchObj,teamId),teamId);
+    if(!squad.length)return`<div style="font-size:11px;color:#bbb;margin:4px 0">${esc(state.teamNames[teamId])}: mark "Who Played" below first, then their names show up here.</div>`;
+    const rows=squad.map(name=>{
+      const c=(matchObj.contributions&&matchObj.contributions[name])||{};
+      const safeName=esc(name).replace(/'/g,"\\'");
+      const stats=DEF_STAT_TALLY_FIELDS.map(([sk,icon,label])=>`
+        <span title="${label}" style="display:inline-flex;align-items:center;gap:2px;background:#f8f7f2;border:1px solid #ddd;border-radius:6px;padding:2px 3px;margin:2px">
+          <button onclick="bumpContribAndRender('${kind}','${ref}','${safeName}','${sk}',-1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#888">−</button>
+          <span style="font-size:11px;min-width:24px;text-align:center;display:inline-block">${icon}${c[sk]||0}</span>
+          <button onclick="bumpContribAndRender('${kind}','${ref}','${safeName}','${sk}',1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#2a7d1a">+</button>
+        </span>`).join('');
+      return`<div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;padding:5px 0;border-bottom:1px solid #eee"><span style="font-size:12px;font-weight:600;min-width:84px">${esc(jerseyLabel(name,teamId))}</span>${stats}</div>`;
+    }).join('');
+    return`<div style="margin-bottom:8px"><div style="font-size:11px;color:#888;margin-bottom:2px">${esc(state.teamNames[teamId])}</div>${rows}</div>`;
+  }).join('');
+  return`${btn}<div class="edit-section" style="margin-top:8px">
+    <div class="customko-hint" style="margin-bottom:6px">🛡️ Tackle · 🧱 Clearance/Block · 🧤 Save · 🔑 Key pass · ❌ Error. Tap + the instant it happens -- ratings recalculate automatically, same as the Lineup tab's Match Stats panel.</div>
+    ${sides}
   </div>`;
 }
 
@@ -7398,6 +7544,7 @@ async function showVerifiedPlayerCard(uid){
   const el=document.getElementById('player-card-content');
   el.innerHTML='<div class="empty-msg">Loading global card…</div>';
   openPlayerCardModal();
+  lastHostProfileRefresh=()=>showVerifiedPlayerCard(uid);
   let career;
   try{
     career=await computeVerifiedPlayerCard(uid);
@@ -7406,7 +7553,7 @@ async function showVerifiedPlayerCard(uid){
     el.innerHTML='<div class="empty-msg">Could not load this player’s global card. Try again.</div>';
     return;
   }
-  if(!career){el.innerHTML='<div class="empty-msg">No verified stats for this player yet.</div>';return;}
+  if(!career){el.innerHTML=hostModeToggleHtml()+`<div class="empty-msg">No verified stats in ${hostViewMode==='friendly'?'Friendly':'Competitive'} mode for this player yet.</div>`;return;}
   const d={
     name:career.name,team:career.team||'Unknown',
     position:'MID', // no single reliable position across every contributing organizer's own playerDB
@@ -7417,13 +7564,14 @@ async function showVerifiedPlayerCard(uid){
     linkedHostCode:career.hostCode||null
   };
   if(!hasCardStats(d)){
-    el.innerHTML=noCardYetHtml(d);
+    el.innerHTML=hostModeToggleHtml()+noCardYetHtml(d);
     return;
   }
   const ovr=calcCardOVR(d);
   const tier=cardTier(ovr,d);
   const attrs=computeCardAttributes(d,ovr);
   el.innerHTML=`
+    ${hostModeToggleHtml()}
     <div class="fifa-card ${tier.cls}">
       <div class="fifa-top">
         <div class="fifa-ovrpos"><div class="fifa-ovr">${ovr}</div><div class="fifa-pos">${esc(d.position)}</div></div>
@@ -7948,6 +8096,7 @@ async function previewHostProfile(rawCode){
     }
     const hostUid=codeSnap.data().uid;
     lastViewedHostUid=hostUid;
+    lastHostProfileRefresh=()=>previewHostProfile(code);
     if(currentUser.uid===hostUid){
       el.innerHTML=`<div class="recap-title">👤 Profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">That's your own host code.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
       return;
@@ -7955,7 +8104,8 @@ async function previewHostProfile(rawCode){
     const snap=await hostProfileDocRef(hostUid).get();
     const d=snap.exists?snap.data():{};
     const hostName=d.hostName||'this host';
-    const list=Array.isArray(d.pastTournaments)?d.pastTournaments:[];
+    const fullList=Array.isArray(d.pastTournaments)?d.pastTournaments:[];
+    const list=filterHostListByMode(fullList);
     lastPastTournamentsList=list;
     const existingFollow=getFollowedHost();
     const alreadyFollowing=!!(existingFollow&&existingFollow.hostCode===code);
@@ -8012,6 +8162,7 @@ async function previewHostProfile(rawCode){
       :`<button class="theme-btn" style="width:100%;margin-top:6px;background:var(--btn-bg);color:#fff" onclick="followHostFromPreview('${code}')">➕ Follow</button>`;
     el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats.</p>
+      ${hostModeToggleHtml()}
       ${liveNowBannerHtml(d)}
       <div class="profile-stats-bar">${streakBadgeHtml(streak)}
         <div class="profile-stats-row">
@@ -8417,7 +8568,7 @@ function renderDraft(){
             ${keeperName?`<span class="rc-cap" style="background:#E08A2A22;color:#E08A2A">🧤 ${esc(keeperName)}</span>`:''}
           </span>
         </div>
-        ${picks.length?`<div class="chip-wrap">${picks.map(p=>`<span class="chip">${esc(p.name)}<button onclick="removeDraftedPlayer(${p.gi})" title="Send back to pool">×</button></span>`).join('')}</div>`:'<div class="rc-empty">No players drafted yet</div>'}
+        ${picks.length?`<div class="chip-wrap">${picks.map(p=>`<span class="chip">${p.jerseyNumber!=null?`<b>#${p.jerseyNumber}</b> `:''}${esc(p.name)}<button onclick="setPlayerJerseyNumber(${p.gi})" title="Set jersey number for this tournament -- shown wherever you pick this player during a live match">🔢</button><button onclick="removeDraftedPlayer(${p.gi})" title="Send back to pool">×</button></span>`).join('')}</div>`:'<div class="rc-empty">No players drafted yet</div>'}
         ${showManualEntry?`<div class="pool-add-row" style="margin-top:8px">
           <select id="keeper-select-${ti}" style="flex:1">
             <option value="">— No keeper set —</option>
@@ -8927,6 +9078,7 @@ function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
     <button class="add-scorer" onclick="promptAddKOAssist('${pathKey}',[${teamIds[0]},${teamIds[1]}])">+ Add assist</button>
     ${compact?'':`<button class="add-scorer" id="ko-voice-btn-${safeId}" onclick="startKOVoiceLog('${pathKey}',[${teamIds[0]},${teamIds[1]}])" style="border-style:dashed">🎤 Voice log</button>`}
     ${squadPickerHtml('ko',pathKey,teamIds,compact)}
+    ${defStatsPanelHtml('ko',pathKey,matchObj,teamIds)}
     <button class="save-btn" onclick="saveKOMatch('${pathKey}',[${teamIds[0]},${teamIds[1]}])">${matchObj.played?'Update result':'Save result (0–0 if no goals)'}</button>
     <div id="ko-toast-${safeId}" class="saved-toast">Result saved ✓</div>
     ${matchObj.played?`<button class="share-btn" onclick="shareKOMatchResult('${pathKey}',[${teamIds[0]},${teamIds[1]}])">📷 Share result</button>`:''}
@@ -10021,6 +10173,26 @@ function entryCountsAsTournament(t){
   if(Array.isArray(t.matches)&&t.matches.length)return t.matches.length>1;
   return !t.external;
 }
+// Friendly/Competitive mode travels with a tournament entry from the moment it's saved (see
+// snapshotCurrentTournament()/logExternalMatchEntry()/logExternalTournamentEntry()) -- but every
+// entry saved BEFORE this existed has no mode recorded at all. Those default to 'friendly'
+// (matching the toggle's own existing default, and the user's explicit call on how to treat
+// pre-existing history) rather than being ambiguous or silently excluded from both views.
+function entryMode(t){
+  return(t&&t.mode==='competitive')?'competitive':'friendly';
+}
+// The local, saved-on-this-device tournament list for whichever mode is CURRENTLY active --
+// "whole separate environments for friendly and competitive" (the user's own words) means the
+// Archive tab, Profile grid, tournament search, Home stories, and the Rivalry Meter should all
+// show only entries from the mode you're presently in, exactly like effectiveTournamentHistory()
+// (below) does for stats/leaderboards. Two separate functions because they read from two
+// different underlying lists (this is always state.tournamentHistory alone; effectiveTournament
+// History() also folds in a followed host's shared ratingPool data) -- but both apply the exact
+// same mode filter, so they always agree with each other about which entries currently "exist".
+function myTournamentHistoryForMode(){
+  const activeMode=isFriendlyMode()?'friendly':'competitive';
+  return(state.tournamentHistory||[]).filter(t=>entryMode(t)===activeMode);
+}
 function computeCareerLeaderboard(){
   const agg={};
   // rows here is always ONE tournament's worth, already collapsed to one row per player by
@@ -10175,7 +10347,7 @@ function computePlayerAchievements(name){
 // degradation used elsewhere in this file for older saved data missing a newer field.
 function collectAllPlayedMatches(){
   const list=[];
-  (state.tournamentHistory||[]).forEach(t=>(t.matches||[]).forEach(m=>list.push(m)));
+  myTournamentHistoryForMode().forEach(t=>(t.matches||[]).forEach(m=>list.push(m)));
   // The CURRENTLY live tournament isn't in tournamentHistory yet until it's saved -- fold its
   // already-played matches in too, same live-plus-archive merge computeCareerLeaderboard() does,
   // guarded the same way (skip once this tournament's own archive entry already covers it).
@@ -10325,7 +10497,7 @@ function renderArchive(){
       <button class="theme-btn" style="width:100%" onclick="restoreLostJuly29Tournament()">↩️ Restore July 29 Tournament</button>
     </div>`;
   }
-  const history=(state.tournamentHistory||[]).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
+  const history=myTournamentHistoryForMode().slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
   html+='<div class="section-header">Saved Tournaments</div>';
   // Tournaments saved before newer saves started auto-publishing to followers (or saved while
   // signed out) can end up missing from a follower's profile -- this fixes all of them in one
@@ -10410,7 +10582,7 @@ function renderProfileStats(){
   const pCount=computeCareerLeaderboard().length;
   const trophyCount=computeTrophyCabinet().reduce((s,t)=>s+t.total,0);
   const followerCount=myFollowersList.length;
-  const streak=computeTournamentStreak((state.tournamentHistory||[]).map(t=>t.date));
+  const streak=computeTournamentStreak(myTournamentHistoryForMode().map(t=>t.date));
   el.innerHTML=`${streakBadgeHtml(streak)}
     <div class="profile-stats-row">
       <div class="profile-stat" onclick="switchProfilePill('grid')"><div class="profile-stat-num">${tCount}</div><div class="profile-stat-label">Tournaments</div></div>
@@ -10485,7 +10657,7 @@ function renderProfileGrid(){
   const el=document.getElementById('profile-grid-container');
   const stripEl=document.getElementById('profile-highlights-strip');
   if(!el)return;
-  const history=(state.tournamentHistory||[]).filter(t=>!t.hiddenFromProfileGrid).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
+  const history=myTournamentHistoryForMode().filter(t=>!t.hiddenFromProfileGrid).slice().sort((a,b)=>(b.date||'').localeCompare(a.date||'')||(b.savedAt||0)-(a.savedAt||0));
   if(stripEl)stripEl.innerHTML=highlightsStripHtml(history,t=>"openProfileEntry('"+t.id+"')");
   if(!history.length){
     el.innerHTML='<div class="empty-msg" style="grid-column:1/-1">No tournaments saved yet -- save one from the Create menu once you finish it</div>';
@@ -10577,7 +10749,7 @@ function renderSearchResults(){
   const q=(input.value||'').trim().toLowerCase();
   if(!q){el.innerHTML='<div class="empty-msg">Search players or tournaments by name</div>';return;}
   const playerRows=computeCareerLeaderboard().filter(p=>p.name.toLowerCase().includes(q));
-  const tourneyRows=(state.tournamentHistory||[]).filter(t=>(t.label||'').toLowerCase().includes(q));
+  const tourneyRows=myTournamentHistoryForMode().filter(t=>(t.label||'').toLowerCase().includes(q));
   let html='';
   if(playerRows.length){
     html+='<div class="section-header">Players</div>';
@@ -10918,6 +11090,13 @@ function setTournamentMode(mode){
   haptic('tap');
 }
 function isFriendlyMode(){return state.mode!=='competitive';}
+// Spells out the active mode in words, not just color -- see .mode-badge's own comment for why.
+function renderModeBadge(){
+  const el=document.getElementById('app-mode-badge');
+  if(!el)return;
+  const friendly=isFriendlyMode();
+  el.textContent=friendly?'🙂 Friendly':'🏅 Competitive';
+}
 function snapshotMainSlots(){
   return{
     numTeams:state.numTeams,legs:state.legs,formatType:state.formatType,leagueOnly:!!state.leagueOnly,teamNames:state.teamNames,teamCrests:state.teamCrests,
@@ -11492,6 +11671,43 @@ async function shareFollowHostLink(){
 let lastPastTournamentsList=null;
 let lastHostFollowerNames=[]; // names of whatever host's profile is currently open in the recap modal
 let lastViewedHostUid=null; // uid behind whatever host profile is currently open in the recap modal -- needed to address their reactions subcollection
+// Which of a viewed host's two separate environments (Friendly/Competitive -- see entryMode()'s
+// comment) a FOLLOWER is currently browsing. A follower isn't "in" a mode themselves the way the
+// host is on their own device, so this is scoped to whichever host profile is currently open,
+// not a global app setting -- defaults to friendly, same as everywhere else.
+let hostViewMode='friendly';
+// Re-runs whatever host-profile view is currently open (previewHostProfile or
+// showHostPastTournaments both set this) so switchHostViewMode() can just re-fetch+re-render
+// rather than needing its own separate rendering logic duplicated a third time.
+let lastHostProfileRefresh=null;
+function switchHostViewMode(mode){
+  if(mode!=='friendly'&&mode!=='competitive')return;
+  hostViewMode=mode;
+  haptic('tap');
+  if(lastHostProfileRefresh)lastHostProfileRefresh();
+}
+// A published past-tournament entry's mode, read off its embedded snapshot -- see
+// publishArchivedTournamentToFollowers()'s comment for why PRIVATE entries never get a snapshot
+// embedded at all (nothing to leak, but also nothing to categorize by mode either).
+function hostEntryMode(t){
+  return(t&&t.snapshot)?entryMode(t.snapshot):null;
+}
+// Filters a host's published tournament list down to the currently selected view mode for
+// stats/grid purposes -- "everywhere it should be the same" (the user's own words) means a
+// follower's view of a host's career leaderboard/trophy cabinet/archetypes/tournament grid
+// should be just as strictly split as the host's own local Archive/Career/Profile. The one
+// exception: a currently-LIVE (not yet archived) tournament has no snapshot to check a mode
+// against at all -- it's happening right now, so it always stays visible rather than silently
+// disappearing depending on which mode happens to be selected.
+function filterHostListByMode(list){
+  return(list||[]).filter(t=>t.archived?hostEntryMode(t)===hostViewMode:true);
+}
+function hostModeToggleHtml(){
+  return`<div class="profile-pills" style="margin:10px 0">
+    <button class="profile-pill${hostViewMode==='friendly'?' active':''}" onclick="switchHostViewMode('friendly')">🙂 Friendly</button>
+    <button class="profile-pill${hostViewMode==='competitive'?' active':''}" onclick="switchHostViewMode('competitive')">🏅 Competitive</button>
+  </div>`;
+}
 // Follower-facing equivalent of computeCareerLeaderboard() -- combines every PUBLIC archived
 // tournament's embedded snapshot (hostProfiles.pastTournaments[].snapshot) into one all-time
 // leaderboard, built entirely from the host's own published data via the same
@@ -11639,6 +11855,7 @@ function computeFormFromRatings(ratings){
 async function showHostPastTournaments(){
   if(!followedHost){alert('Follow a host first.');return;}
   lastViewedHostUid=followedHost.hostUid;
+  lastHostProfileRefresh=()=>showHostPastTournaments();
   const hostName=followedHost.hostName||'Their';
   const el=document.getElementById('recap-card-content');
   el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div><p style="font-size:12px;color:var(--text-muted);text-align:center">Loading…</p>`;
@@ -11646,10 +11863,11 @@ async function showHostPastTournaments(){
   try{
     const snap=await hostProfileDocRef(followedHost.hostUid).get();
     const profData=snap.exists?snap.data():{};
-    const list=Array.isArray(profData.pastTournaments)?profData.pastTournaments:[];
+    const fullList=Array.isArray(profData.pastTournaments)?profData.pastTournaments:[];
+    const list=filterHostListByMode(fullList);
     lastPastTournamentsList=list;
     if(!list.length){
-      el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>${liveNowBannerHtml(profData)}<p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
+      el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>${hostModeToggleHtml()}${liveNowBannerHtml(profData)}<p style="font-size:12px;color:var(--text-muted);text-align:center;margin-bottom:14px">Nothing shared in ${hostViewMode==='friendly'?'Friendly':'Competitive'} mode yet.</p><div class="recap-actions"><button class="pc-btn pc-btn-close" onclick="closeRecapModal()">Close</button></div>`;
       return;
     }
     const followerCount=(snap.exists&&Array.isArray(snap.data().followers))?snap.data().followers.length:0;
@@ -11697,6 +11915,7 @@ async function showHostPastTournaments(){
     const highlightsHtml=highlightsStripHtml(list,t=>"viewHostPastTournament('"+t.code+"','"+t.visibility+"','"+(t.historyId||'')+"')");
     el.innerHTML=`<div class="recap-title">👤 ${esc(hostName)}'s profile</div>
       <p style="font-size:11px;color:var(--text-faint);text-align:center;margin-bottom:12px">Their public archive and career stats -- kept separate from your own.</p>
+      ${hostModeToggleHtml()}
       ${liveNowBannerHtml(profData)}
       <div class="profile-stats-bar">${streakBadgeHtml(streak)}
         <div class="profile-stats-row">
@@ -12385,7 +12604,7 @@ function renderSub(){
 let currentHomeStories=[];
 function computeHomeStories(){
   const stories=[];
-  const streak=computeTournamentStreak((state.tournamentHistory||[]).map(t=>t.date));
+  const streak=computeTournamentStreak(myTournamentHistoryForMode().map(t=>t.date));
   if(streak>=2)stories.push({icon:'🔥',title:'Streak',detail:streak+' tournaments in a row so far -- still going.'});
   const lastPlayedIdx=(state.results||[]).map((r,i)=>r.played?i:-1).filter(i=>i>=0).pop();
   if(lastPlayedIdx!=null){
@@ -12496,6 +12715,10 @@ function renderAll(){
   updatePendingApprovalUI();
   if(isPendingApproval())return; // nothing else to render -- the waiting screen covers everything
   document.body.classList.toggle('viewer-mode',isViewerMode());
+  // Drives the [data-app-mode="competitive"] CSS override above -- every render pass, so it's
+  // always in sync with state.mode regardless of which code path changed it.
+  document.documentElement.setAttribute('data-app-mode',isFriendlyMode()?'friendly':'competitive');
+  renderModeBadge();
   const steps=[renderSub,renderHome,renderActivity,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderReelsFeed,renderArchive,renderCareer,renderProfile,renderSettings];
   steps.forEach(fn=>{
     try{fn();}catch(e){console.error('Render step failed:',fn.name,e);}
