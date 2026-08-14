@@ -6774,25 +6774,41 @@ function savePdfBlob(doc,filename,shareTitle,shareText){
   (async()=>{
     const sharePlugin=nativeSharePlugin();
     const fsPlugin=nativeFilesystemPlugin();
-    if(sharePlugin&&fsPlugin){
+    if(fsPlugin){
+      // Native: ACTUALLY save the file first -- to the Documents directory (persistent, visible
+      // in the device's Files app), not the ephemeral Cache dir the image-share flow uses, since
+      // Cache is only ever meant to be read back out via the Share sheet, not kept. Downloading
+      // it is the primary, guaranteed action here; the share sheet is then offered as an
+      // optional next step, not the only way to get the file at all (which is what "download"
+      // silently opening only the share sheet, with no actual save happening, looked like before).
       try{
         const base64=await blobToBase64(blob);
-        const written=await fsPlugin.writeFile({path:filename,data:base64,directory:'CACHE'});
-        await sharePlugin.share({title:shareTitle,text:shareText,url:written.uri,dialogTitle:shareTitle});
+        const written=await fsPlugin.writeFile({path:filename,data:base64,directory:'DOCUMENTS'});
+        alert('Saved '+filename+' to your device.'+(sharePlugin?' Opening the share sheet in case you\'d like to send it to someone.':''));
+        if(sharePlugin){
+          try{
+            await sharePlugin.share({title:shareTitle,text:shareText,url:written.uri,dialogTitle:shareTitle});
+          }catch(e){
+            if(!(e&&/cancel/i.test(e.message||'')))console.error('Share failed after saving PDF:',e);
+          }
+        }
         return;
       }catch(e){
-        if(e&&/cancel/i.test(e.message||''))return; // user dismissed the share sheet -- don't fall through
+        console.error('Could not save PDF to device, falling back to web-style download:',e);
+        // fall through to the web-style handling below as a last resort
       }
     }
+    // Web: a real browser download (into the Downloads folder) is the primary action, same as
+    // any other file download -- then, if the browser also supports sharing a file, offer that
+    // too as a secondary, optional step.
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=filename;
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),4000);
     const file=new File([blob],filename,{type:'application/pdf'});
     if(navigator.canShare&&navigator.canShare({files:[file]})){
       navigator.share({files:[file],title:shareTitle,text:shareText}).catch(()=>{});
-    }else{
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');
-      a.href=url;a.download=filename;
-      document.body.appendChild(a);a.click();a.remove();
-      setTimeout(()=>URL.revokeObjectURL(url),4000);
     }
   })();
 }
