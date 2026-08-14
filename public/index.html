@@ -11695,12 +11695,20 @@ function hostEntryMode(t){
 // Filters a host's published tournament list down to the currently selected view mode for
 // stats/grid purposes -- "everywhere it should be the same" (the user's own words) means a
 // follower's view of a host's career leaderboard/trophy cabinet/archetypes/tournament grid
-// should be just as strictly split as the host's own local Archive/Career/Profile. The one
-// exception: a currently-LIVE (not yet archived) tournament has no snapshot to check a mode
-// against at all -- it's happening right now, so it always stays visible rather than silently
-// disappearing depending on which mode happens to be selected.
+// should be just as strictly split as the host's own local Archive/Career/Profile. Two
+// exceptions, both pre-existing behavior this must not break: a currently-LIVE (not yet
+// archived) tournament has no snapshot to check a mode against, so it always stays visible; and
+// an ARCHIVED entry with no embedded snapshot at all (a private entry -- see
+// publishArchivedTournamentToFollowers()'s comment -- or one saved before snapshots/mode
+// existed) has nothing to categorize by mode either, so it's left visible in both views too,
+// exactly like it was before mode-filtering existed. It just can't (and already couldn't)
+// contribute anything to the mode-filtered STATS below, since computeHostCareerLeaderboard()
+// and friends already skip snapshot-less entries on their own.
 function filterHostListByMode(list){
-  return(list||[]).filter(t=>t.archived?hostEntryMode(t)===hostViewMode:true);
+  return(list||[]).filter(t=>{
+    if(!t.archived||!t.snapshot)return true;
+    return hostEntryMode(t)===hostViewMode;
+  });
 }
 function hostModeToggleHtml(){
   return`<div class="profile-pills" style="margin:10px 0">

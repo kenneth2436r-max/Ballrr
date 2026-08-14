@@ -67,7 +67,7 @@ test('computeCareerLeaderboard only shows players from the currently active mode
   assert.deepStrictEqual(Array.from(r.compNames), ['Densil'], 'competitive mode should see only Densil\'s competitive entry, not Keith or Sam');
 });
 
-test('hostEntryMode/filterHostListByMode split a followed host\'s published list the same way, keeping a live (not-yet-archived) pointer entry visible regardless of mode', () => {
+test('hostEntryMode/filterHostListByMode split a followed host\'s published list by mode where there IS snapshot data, while leaving snapshot-less entries (private, or pre-dating mode) visible in both -- matching pre-existing "show every archived tile regardless" behavior', () => {
   const { window } = freshWindow();
   const r = runInOneEval(window, `
     const list = [
@@ -81,8 +81,8 @@ test('hostEntryMode/filterHostListByMode split a followed host\'s published list
     hostViewMode = 'competitive';
     window.__results.competitive = filterHostListByMode(list).map(t => t.historyId || t.code);
   `);
-  assert.deepStrictEqual(Array.from(r.friendly), ['h1', 'LIVE1'], 'friendly view: h1 (friendly snapshot) + the always-visible live pointer, not h2 or the private/snapshot-less h3');
-  assert.deepStrictEqual(Array.from(r.competitive), ['h2', 'LIVE1'], 'competitive view: h2 + the same always-visible live pointer');
+  assert.deepStrictEqual(Array.from(r.friendly), ['h1', 'h3', 'LIVE1'], 'friendly view: h1 (friendly snapshot) + the snapshot-less h3 (nothing to categorize, stays visible) + the always-visible live pointer, not h2');
+  assert.deepStrictEqual(Array.from(r.competitive), ['h2', 'h3', 'LIVE1'], 'competitive view: h2 + the same always-visible snapshot-less h3 and live pointer');
 });
 
 test('switchHostViewMode only accepts friendly/competitive and re-runs whatever refresh callback is currently registered', () => {
