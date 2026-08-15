@@ -148,6 +148,26 @@ test('buildTournamentReportData ranks top scorers/assists/clean sheets and compu
   assert.strictEqual(t.matches[0].teamA, 'Red FC');
 });
 
+test('buildTournamentReportData surfaces defensive/technical leaderboards (tackles/saves/clearances/key passes) alongside goals/assists, so a tournament report can show who defended well, not just who attacked well', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.t = buildTournamentReportData({
+      id: 't1', label: 'Summer Cup', date: '2026-07-01',
+      playerStats: [
+        { name:'Keith', team:'Red FC', avg:7, count:2, goals:0, assists:0, cleanSheets:0, tackles:6, clearances:2, saves:0, keyPasses:1, errors:0 },
+        { name:'Sam', team:'Blue FC', avg:7, count:2, goals:0, assists:0, cleanSheets:1, tackles:0, clearances:0, saves:8, keyPasses:0, errors:1 }
+      ]
+    });
+  `);
+  const t = r.t;
+  assert.strictEqual(t.topTackles[0].name, 'Keith');
+  assert.strictEqual(t.topTackles[0].tackles, 6);
+  assert.strictEqual(t.topSaves[0].name, 'Sam');
+  assert.strictEqual(t.topSaves[0].saves, 8);
+  assert.strictEqual(t.topClearances[0].name, 'Keith');
+  assert.strictEqual(t.topKeyPasses[0].name, 'Keith');
+});
+
 test('buildTournamentReportData labels a Log External Tournament entry distinctly and returns null for no entry', () => {
   const { window } = freshWindow();
   const r = runInOneEval(window, `
@@ -206,6 +226,74 @@ test('buildHostPlayerReportData returns null for a player with no public data, a
   assert.ok(r.found.ovr);
   assert.strictEqual(r.found.appearances.length, 1);
   assert.strictEqual(r.found.appearances[0].label, 'Host Cup');
+});
+
+test('pdfSafeText strips emoji/pictographic characters (jsPDF\'s core font can\'t render them and produces garbled bytes) while leaving normal text untouched', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.wordmark = pdfSafeText('⚽ BALLRR');
+    window.__results.tournamentLabel = pdfSafeText('📍 Match played elsewhere');
+    window.__results.trophyLabel = pdfSafeText('🏆 Sunday League');
+    window.__results.formArrow = pdfSafeText('On the rise 📈');
+    window.__results.twoWay = pdfSafeText('3⚽ 2🅰 — equally dangerous both ways');
+    window.__results.plain = pdfSafeText('Keith O\\'Brien');
+    window.__results.nullish = pdfSafeText(null);
+    window.__results.undef = pdfSafeText(undefined);
+  `);
+  assert.strictEqual(r.wordmark, 'BALLRR');
+  assert.strictEqual(r.tournamentLabel, 'Match played elsewhere');
+  assert.strictEqual(r.trophyLabel, 'Sunday League');
+  assert.strictEqual(r.formArrow, 'On the rise');
+  assert.strictEqual(r.twoWay, '3 2 — equally dangerous both ways');
+  assert.strictEqual(r.plain, "Keith O'Brien", 'plain ASCII text must pass through unchanged');
+  assert.strictEqual(r.nullish, '');
+  assert.strictEqual(r.undef, '');
+});
+
+test('curateReportTags keeps only the highest achievement tier per stat family, orders archetypes before achievements before badges, and caps the combined list at 8', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.tiered = curateReportTags({
+      archetypes: [{ label: 'The Poacher' }],
+      achievements: [
+        { label: 'On the Scoresheet' }, { label: 'Golden Boot Contender' }, { label: 'Goal Machine' },
+        { label: 'Provider' }
+      ],
+      badges: [{ label: 'Hat-trick hero' }]
+    });
+    window.__results.capped = curateReportTags({
+      archetypes: [{label:'A1'},{label:'A2'},{label:'A3'}],
+      achievements: [{label:'E1'},{label:'E2'},{label:'E3'},{label:'E4'}],
+      badges: [{label:'B1'},{label:'B2'},{label:'B3'}]
+    });
+    window.__results.empty = curateReportTags({});
+  `);
+  assert.deepStrictEqual(Array.from(r.tiered), ['The Poacher', 'Goal Machine', 'Provider', 'Hat-trick hero'],
+    'only "Goal Machine" (the highest of the 3 goal-tiers) should survive, in archetypes -> achievements -> badges order');
+  assert.strictEqual(r.capped.length, 8, 'combined list of 10 tags should be capped at 8');
+  assert.deepStrictEqual(Array.from(r.empty), []);
+});
+
+test('buildTournamentReportData surfaces a discipline leaderboard (yellow/red cards) sorted by red cards first, then yellow cards, and stays empty when nobody was booked', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    window.__results.t = buildTournamentReportData({
+      id: 't1', label: 'Cup Final', date: '2026-07-01',
+      playerStats: [
+        { name:'Keith', team:'Red FC', avg:7, count:2, goals:0, assists:0, cleanSheets:0, yellowCards:2, redCards:0 },
+        { name:'Densil', team:'Blue FC', avg:7, count:2, goals:0, assists:0, cleanSheets:0, yellowCards:1, redCards:1 },
+        { name:'Sam', team:'Blue FC', avg:7, count:2, goals:0, assists:0, cleanSheets:0, yellowCards:0, redCards:0 }
+      ]
+    });
+    window.__results.clean = buildTournamentReportData({
+      id: 't2', label: 'Friendly Kickabout', date: '2026-07-02',
+      playerStats: [ { name:'Sam', team:'Blue FC', avg:7, count:2, goals:0, assists:0, cleanSheets:0 } ]
+    });
+  `);
+  assert.strictEqual(r.t.discipline.length, 2, 'Sam has no cards, so only Keith and Densil should appear');
+  assert.strictEqual(r.t.discipline[0].name, 'Densil', 'a red card outranks two yellows with no red');
+  assert.strictEqual(r.t.discipline[1].name, 'Keith');
+  assert.deepStrictEqual(Array.from(r.clean.discipline), [], 'no cards logged (e.g. a friendly-mode tournament) should produce an empty discipline table, not zeroes');
 });
 
 test('buildVerifiedPlayerReportData returns null for an unverified uid, and a finalized report for a real one', async () => {

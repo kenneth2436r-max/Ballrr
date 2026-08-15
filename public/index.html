@@ -1994,7 +1994,7 @@ async function computeVerifiedPlayerCard(verifiedUid){
   if(!idxSnap.exists)return null;
   const idx=idxSnap.data();
   const contribSnap=await verifiedPlayerDocRef(verifiedUid).collection('contributions').get();
-  const agg={name:idx.name,team:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
+  const agg={name:idx.name,team:null,goals:0,assists:0,cleanSheets:0,tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,yellowCards:0,redCards:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
   // Same environment split as everywhere else -- see entryMode()'s comment -- gated by
   // hostViewMode, the same "which of the two environments am I currently browsing" toggle a
   // followed host's profile uses, since this is the same kind of cross-account, follower-facing
@@ -2007,6 +2007,13 @@ async function computeVerifiedPlayerCard(verifiedUid){
     agg.goals+=p.goals||0;
     agg.assists+=p.assists||0;
     agg.cleanSheets+=p.cleanSheets||0;
+    agg.tackles+=p.tackles||0;
+    agg.clearances+=p.clearances||0;
+    agg.saves+=p.saves||0;
+    agg.keyPasses+=p.keyPasses||0;
+    agg.errors+=p.errors||0;
+    agg.yellowCards+=p.yellowCards||0;
+    agg.redCards+=p.redCards||0;
     agg.matchesTotal+=p.count||0;
     if(p.avg!=null&&p.count){agg.ratingSum+=p.avg*p.count;agg.ratingCount+=p.count;}
     agg.tournaments+=1;
@@ -2015,6 +2022,8 @@ async function computeVerifiedPlayerCard(verifiedUid){
   return{
     uid:verifiedUid,name:agg.name,team:agg.team||'Unknown',
     goals:agg.goals,assists:agg.assists,cleanSheets:agg.cleanSheets,
+    tackles:agg.tackles,clearances:agg.clearances,saves:agg.saves,keyPasses:agg.keyPasses,errors:agg.errors,
+    yellowCards:agg.yellowCards,redCards:agg.redCards,
     avg:agg.ratingCount?agg.ratingSum/agg.ratingCount:null,
     matches:agg.matchesTotal,tournaments:agg.tournaments,
     matchRatings:agg.matchRatings,
@@ -4920,6 +4929,37 @@ function computeTournamentChampion(){
   return(t.length&&t[0].p>0)?t[0].name:null;
 }
 // and browsing by date actually need.
+const CONTRIB_STAT_KEYS=['tackles','clearances','saves','keyPasses','errors'];
+// Yellow/red cards are tracked separately from CONTRIB_STAT_KEYS above (rather than folded into
+// that same list) because they're competitive-mode-only -- see isFriendlyMode() gating in
+// defStatsPanelHtml()/bumpCardAndRender() -- and because a "cards" total needs its own suspension
+// read (isPlayerSuspended() below), unlike the purely additive defensive stats.
+const CARD_STAT_KEYS=['yellowCards','redCards'];
+// Sums each player's Match Stats contribution entries (tackles/clearances/saves/keyPasses/
+// errors -- see contribPanelHtml()/bumpContribAndRender()) across every match they featured in
+// THIS tournament, keyed the same way collectMatchRatings()/ratingStats are (name+'||'+teamId).
+// These numbers already feed the rating calculation live (computePlayerMatchRating()), but were
+// previously discarded once the tournament was saved -- nothing carried the raw totals forward
+// into playerStats, so a defender's whole tackle/clearance history was unrecoverable the moment
+// the live match state reset, and a scouting report had nothing to show beyond goals/assists
+// (attacking numbers) even for a DEF/GK, regardless of how much real defensive work they'd
+// logged. Persisting the totals here is what lets career stats, player cards, and the PDF
+// scouting report actually substantiate a defensive position with real tracked numbers.
+function aggregateContribTotals(){
+  const totals={};
+  allPlayedMatchesWithTeams().forEach(({teamIds,m})=>{
+    teamIds.forEach(teamId=>{
+      getMatchSquad(m,teamId).forEach(name=>{
+        const k=name+'||'+teamId;
+        if(!totals[k])totals[k]={tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,yellowCards:0,redCards:0};
+        const c=(m.contributions&&m.contributions[name])||{};
+        CONTRIB_STAT_KEYS.forEach(key=>{totals[k][key]+=c[key]||0;});
+        CARD_STAT_KEYS.forEach(key=>{totals[k][key]+=c[key]||0;});
+      });
+    });
+  });
+  return totals;
+}
 function snapshotCurrentTournament(){
   const table=calcTable().map(t=>({name:t.name,p:t.p,w:t.w,d:t.d,l:t.l,gf:t.gf,ga:t.ga,gd:t.gd,pts:t.pts}));
   const ratingStats=computeRatingStats();
@@ -4939,10 +4979,14 @@ function snapshotCurrentTournament(){
     const k=name+'||'+teamId;
     (matchRatingsByKey[k]=matchRatingsByKey[k]||[]).push(Math.round(rating*100)/100);
   });
+  const contribByKey=aggregateContribTotals();
   const playerStats=ratingStats.map(s=>{
     const k=s.name+'||'+s.teamId;
+    const contrib=contribByKey[k]||{tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,yellowCards:0,redCards:0};
     return{name:s.name,team:s.team,position:s.position,avg:Math.round(s.avg*100)/100,count:s.count,
       goals:goalsByKey[k]||0,assists:assistsByKey[k]||0,cleanSheets:cleanSheetsByKey[k]||0,
+      tackles:contrib.tackles,clearances:contrib.clearances,saves:contrib.saves,keyPasses:contrib.keyPasses,errors:contrib.errors,
+      yellowCards:contrib.yellowCards||0,redCards:contrib.redCards||0,
       matchRatings:matchRatingsByKey[k]||[],code:s.code||null};
   });
   const synergy=computeSynergy().map(p=>({a:p.a,b:p.b,team:p.team,output:Math.round(p.output*100)/100,matches:p.matches,g1:p.g1,a1:p.a1,g2:p.g2,a2:p.a2}));
@@ -5130,55 +5174,74 @@ function logExternalMatchEntry(){
                         showThemedPrompt('Key Passes/Chances created (optional, 0 if not tracked):','0',(keyPassesStr)=>{
                           const keyPasses=Math.max(0,parseInt(keyPassesStr,10)||0);
                           const afterSaves=(saves)=>{
-                            showThemedPrompt('Errors leading to a goal (optional, 0 if none):','0',async(errorsStr)=>{
+                            showThemedPrompt('Errors leading to a goal (optional, 0 if none):','0',(errorsStr)=>{
                               const errors=Math.max(0,parseInt(errorsStr,10)||0);
-                              const contrib={tackles,clearances,saves,keyPasses,errors};
-                              const cleanSheet=oppScore===0;
-                              const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
-                              // Same engine, same shape of inputs a tracked match's scorers/
-                              // assists/scoreline/Match Stats panel would produce, so an external
-                              // match's rating lands on the same scale and logic as everything
-                              // else feeding a player's overall performance and player card.
-                              const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,contrib)*100)/100;
-                              const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
-                              const finalDate=dateStr.trim()||todayStr;
-                              const finalVenue=venueStr.trim();
-                              // Self-attributed, so it's automatically "verified" for the
-                              // universal player search (see verifiedPlayerDocRef()'s comment) --
-                              // no manual linking needed, this IS your own signed-in account's
-                              // own code.
-                              let myCode=null;
-                              try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external match:',e);}
-                              state.tournamentHistory=state.tournamentHistory||[];
-                              state.tournamentHistory.push({
-                                id,
-                                date:finalDate,
-                                label:'📍 '+(finalVenue||'Match played elsewhere'),
-                                external:true,
-                                venue:finalVenue||null,
-                                minutesPlayed,
-                                note:`${minutesPlayed} min played · Final score ${teamScore}-${oppScore} (${result}) · Rating auto-calculated from goals/assists/clean sheet/match stats, same as an in-app match.`,
-                                numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
-                                mode:isFriendlyMode()?'friendly':'competitive',
-                                // A single logged match is never a "tournament" for career stats
-                                // purposes (see entryCountsAsTournament()) -- it only adds 1 to
-                                // this player's match count. Use "Log External Tournament" for a
-                                // multi-match external event that should count as one.
-                                isTournament:false,
-                                playerStats:[{
-                                  name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
-                                  goals,assists,cleanSheets:cleanSheet?1:0,matchRatings:[rating],code:myCode
-                                }],
-                                visibility:'private',
-                                savedAt:Date.now()
-                              });
-                              saveState();
-                              renderArchive();
-                              renderCareer();
-                              renderProfile();
-                              alert(`Match logged -- rating auto-calculated at ${rating.toFixed(1)}, now counts toward your career stats and player card.`);
-                              syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
-                              syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
+                              // Cards are competitive-mode-only (same gating as the live Matches-tab
+                              // tally in defStatsPanelHtml()/bumpCardAndRender()) -- a friendly
+                              // kickabout skips straight to finish() with 0/0 rather than asking.
+                              const finish=async(yellowCards,redCards)=>{
+                                const contrib={tackles,clearances,saves,keyPasses,errors};
+                                const cleanSheet=oppScore===0;
+                                const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
+                                // Same engine, same shape of inputs a tracked match's scorers/
+                                // assists/scoreline/Match Stats panel would produce, so an external
+                                // match's rating lands on the same scale and logic as everything
+                                // else feeding a player's overall performance and player card.
+                                const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,contrib)*100)/100;
+                                const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
+                                const finalDate=dateStr.trim()||todayStr;
+                                const finalVenue=venueStr.trim();
+                                // Self-attributed, so it's automatically "verified" for the
+                                // universal player search (see verifiedPlayerDocRef()'s comment) --
+                                // no manual linking needed, this IS your own signed-in account's
+                                // own code.
+                                let myCode=null;
+                                try{myCode=await ensureHostCode();}catch(e){console.error('Could not resolve own host code for external match:',e);}
+                                state.tournamentHistory=state.tournamentHistory||[];
+                                state.tournamentHistory.push({
+                                  id,
+                                  date:finalDate,
+                                  label:'📍 '+(finalVenue||'Match played elsewhere'),
+                                  external:true,
+                                  venue:finalVenue||null,
+                                  minutesPlayed,
+                                  note:`${minutesPlayed} min played · Final score ${teamScore}-${oppScore} (${result}) · Rating auto-calculated from goals/assists/clean sheet/match stats, same as an in-app match.`,
+                                  numTeams:null,legs:null,teamNames:[],table:[],matches:[],synergy:[],champion:null,
+                                  mode:isFriendlyMode()?'friendly':'competitive',
+                                  // A single logged match is never a "tournament" for career stats
+                                  // purposes (see entryCountsAsTournament()) -- it only adds 1 to
+                                  // this player's match count. Use "Log External Tournament" for a
+                                  // multi-match external event that should count as one.
+                                  isTournament:false,
+                                  playerStats:[{
+                                    name:state.myExternalName,team:null,position:pos,avg:rating,count:1,
+                                    goals,assists,cleanSheets:cleanSheet?1:0,
+                                    tackles,clearances,saves,keyPasses,errors,
+                                    yellowCards,redCards,
+                                    matchRatings:[rating],code:myCode
+                                  }],
+                                  visibility:'private',
+                                  savedAt:Date.now()
+                                });
+                                saveState();
+                                renderArchive();
+                                renderCareer();
+                                renderProfile();
+                                alert(`Match logged -- rating auto-calculated at ${rating.toFixed(1)}, now counts toward your career stats and player card.`);
+                                syncRatingPoolWithLocalHistory().catch(e=>console.error('Could not sync rating pool:',e));
+                                syncVerifiedContributionsForHistory(state.tournamentHistory.filter(t=>t.id===id)).catch(e=>console.error('Could not sync verified contributions:',e));
+                              };
+                              if(!isFriendlyMode()){
+                                showThemedPrompt('Yellow cards received (0-2, competitive mode only):','0',(yellowStr)=>{
+                                  const yellowCards=Math.max(0,Math.min(2,parseInt(yellowStr,10)||0));
+                                  showThemedPrompt('Red card received? (0 = no, 1 = yes):','0',(redStr)=>{
+                                    const redCards=Math.max(0,Math.min(1,parseInt(redStr,10)||0));
+                                    finish(yellowCards,redCards);
+                                  });
+                                });
+                              }else{
+                                finish(0,0);
+                              }
                             });
                           };
                           if(pos==='GK'){
@@ -5232,7 +5295,7 @@ function logExternalTournamentEntry(){
           const pos=POSITIONS.includes((posStr||'').trim().toUpperCase())?(posStr.trim().toUpperCase()):'MID';
           showThemedPrompt('How many matches did you play in this tournament?','2',(countStr)=>{
             const totalMatches=Math.max(1,Math.min(30,parseInt(countStr,10)||2));
-            const acc={goals:0,assists:0,cleanSheets:0,ratings:[],minutes:0};
+            const acc={goals:0,assists:0,cleanSheets:0,tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,yellowCards:0,redCards:0,ratings:[],minutes:0};
             const finishTournament=async()=>{
               const id='ext'+Date.now()+Math.random().toString(36).slice(2,7);
               const avg=Math.round((acc.ratings.reduce((s,r)=>s+r,0)/acc.ratings.length)*100)/100;
@@ -5255,7 +5318,10 @@ function logExternalTournamentEntry(){
                 isTournament:totalMatches>1,
                 playerStats:[{
                   name:state.myExternalName,team:null,position:pos,avg,count:totalMatches,
-                  goals:acc.goals,assists:acc.assists,cleanSheets:acc.cleanSheets,matchRatings:acc.ratings.slice(),code:myCode
+                  goals:acc.goals,assists:acc.assists,cleanSheets:acc.cleanSheets,
+                  tackles:acc.tackles,clearances:acc.clearances,saves:acc.saves,keyPasses:acc.keyPasses,errors:acc.errors,
+                  yellowCards:acc.yellowCards,redCards:acc.redCards,
+                  matchRatings:acc.ratings.slice(),code:myCode
                 }],
                 visibility:'private',
                 savedAt:Date.now()
@@ -5290,15 +5356,37 @@ function logExternalTournamentEntry(){
                               const afterSaves=(saves)=>{
                                 showThemedPrompt(tag+'Errors leading to a goal (optional, 0 if none):','0',(errorsStr)=>{
                                   const errors=Math.max(0,parseInt(errorsStr,10)||0);
-                                  const contrib={tackles,clearances,saves,keyPasses,errors};
-                                  const cleanSheet=oppScore===0;
-                                  const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
-                                  const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,contrib)*100)/100;
-                                  acc.goals+=goals;
-                                  acc.assists+=assists;
-                                  if(cleanSheet)acc.cleanSheets+=1;
-                                  acc.ratings.push(rating);
-                                  askMatch(i+1);
+                                  const recordMatch=(yellowCards,redCards)=>{
+                                    const contrib={tackles,clearances,saves,keyPasses,errors};
+                                    const cleanSheet=oppScore===0;
+                                    const result=teamScore>oppScore?'win':teamScore<oppScore?'loss':'draw';
+                                    const rating=Math.round(computePlayerMatchRating(pos,goals,assists,cleanSheet,oppScore,result,contrib)*100)/100;
+                                    acc.goals+=goals;
+                                    acc.assists+=assists;
+                                    if(cleanSheet)acc.cleanSheets+=1;
+                                    acc.tackles+=tackles;
+                                    acc.clearances+=clearances;
+                                    acc.saves+=saves;
+                                    acc.keyPasses+=keyPasses;
+                                    acc.errors+=errors;
+                                    acc.yellowCards+=yellowCards;
+                                    acc.redCards+=redCards;
+                                    acc.ratings.push(rating);
+                                    askMatch(i+1);
+                                  };
+                                  // Cards are competitive-mode-only -- same gating as Log External
+                                  // Match and the live Matches-tab tally.
+                                  if(!isFriendlyMode()){
+                                    showThemedPrompt(tag+'Yellow cards received (0-2, competitive mode only):','0',(yellowStr)=>{
+                                      const yellowCards=Math.max(0,Math.min(2,parseInt(yellowStr,10)||0));
+                                      showThemedPrompt(tag+'Red card received? (0 = no, 1 = yes):','0',(redStr)=>{
+                                        const redCards=Math.max(0,Math.min(1,parseInt(redStr,10)||0));
+                                        recordMatch(yellowCards,redCards);
+                                      });
+                                    });
+                                  }else{
+                                    recordMatch(0,0);
+                                  }
                                 });
                               };
                               if(pos==='GK'){
@@ -5814,11 +5902,53 @@ function bumpContribAndRender(kind,ref,name,statKey,delta){
   haptic('tap');
   if(kind==='league')renderMatches();else renderKnockout();
 }
+// Yellow/red cards, competitive mode only (per user request -- a friendly 5-a-side kickabout has
+// no disciplinary record to track). Capped per match: 2 yellows, 1 red -- a second yellow is a
+// real dismissal, so the hint below tells the host to tap Red too rather than trying to guess and
+// auto-convert it here (the host is watching the match live and knows better than any heuristic).
+const DISCIPLINE_TALLY_FIELDS=[['yellowCards','🟨','Yellow Card',2],['redCards','🟥','Red Card',1]];
+function bumpCardAndRender(kind,ref,name,cardKey,delta){
+  const matchObj=kind==='league'?state.results[parseInt(ref,10)]:getMatchObjByPath(ref);
+  if(!matchObj)return;
+  if(!matchObj.contributions)matchObj.contributions={};
+  if(!matchObj.contributions[name])matchObj.contributions[name]={};
+  const cap=cardKey==='yellowCards'?2:1;
+  const c=matchObj.contributions[name];
+  c[cardKey]=Math.max(0,Math.min(cap,(c[cardKey]||0)+delta));
+  saveState();
+  haptic('tap');
+  if(kind==='league')renderMatches();else renderKnockout();
+}
+// Running discipline totals for a player across every played match THIS tournament (across both
+// teams if teamId is omitted, or scoped to one team) -- the same allPlayedMatchesWithTeams() walk
+// aggregateContribTotals() uses, just filtered to the two card fields.
+function playerDisciplineTotals(name,teamId){
+  let yellowCards=0,redCards=0;
+  allPlayedMatchesWithTeams().forEach(({teamIds,m})=>{
+    if(teamId!=null&&!teamIds.includes(teamId))return;
+    const c=m.contributions&&m.contributions[name];
+    if(!c)return;
+    yellowCards+=c.yellowCards||0;
+    redCards+=c.redCards||0;
+  });
+  return{yellowCards,redCards};
+}
+// A simple, transparent suspension read for competitive mode: any red card, or 3+ accumulated
+// yellows this tournament, flags the player -- shown as an informational tag (in the squad
+// picker/def-stats panel) rather than something that blocks selection, matching the app's
+// existing philosophy elsewhere (jersey numbers, mode badges) of surfacing information for the
+// host to act on rather than enforcing referee-level rules the app can't fully see.
+function isPlayerSuspended(name,teamId){
+  if(isFriendlyMode())return false;
+  const{yellowCards,redCards}=playerDisciplineTotals(name,teamId);
+  return redCards>=1||yellowCards>=3;
+}
 function defStatsPanelHtml(kind,ref,matchObj,teamIds){
   const key=kind+'|'+ref;
   const isOpen=defStatsOpenFor===key;
   const btn=`<button class="add-scorer" onclick="toggleDefStatsPanel('${kind}','${ref}')" style="border-style:dashed">🛡️ Defensive Stats ${isOpen?'▾':'▸'}</button>`;
   if(!isOpen)return btn;
+  const showCards=!isFriendlyMode();
   const sides=teamIds.map(teamId=>{
     const squad=sortNamesByJersey(getMatchSquad(matchObj,teamId),teamId);
     if(!squad.length)return`<div style="font-size:11px;color:#bbb;margin:4px 0">${esc(state.teamNames[teamId])}: mark "Who Played" below first, then their names show up here.</div>`;
@@ -5831,12 +5961,19 @@ function defStatsPanelHtml(kind,ref,matchObj,teamIds){
           <span style="font-size:11px;min-width:24px;text-align:center;display:inline-block">${icon}${c[sk]||0}</span>
           <button onclick="bumpContribAndRender('${kind}','${ref}','${safeName}','${sk}',1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#2a7d1a">+</button>
         </span>`).join('');
-      return`<div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;padding:5px 0;border-bottom:1px solid #eee"><span style="font-size:12px;font-weight:600;min-width:84px">${esc(jerseyLabel(name,teamId))}</span>${stats}</div>`;
+      const cards=showCards?DISCIPLINE_TALLY_FIELDS.map(([sk,icon,label])=>`
+        <span title="${label}" style="display:inline-flex;align-items:center;gap:2px;background:#f8f7f2;border:1px solid #ddd;border-radius:6px;padding:2px 3px;margin:2px">
+          <button onclick="bumpCardAndRender('${kind}','${ref}','${safeName}','${sk}',-1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#888">−</button>
+          <span style="font-size:11px;min-width:24px;text-align:center;display:inline-block">${icon}${c[sk]||0}</span>
+          <button onclick="bumpCardAndRender('${kind}','${ref}','${safeName}','${sk}',1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#2a7d1a">+</button>
+        </span>`).join(''):'';
+      const suspendedTag=showCards&&isPlayerSuspended(name,teamId)?'<span style="font-size:10px;font-weight:700;color:#a32d2d;margin-left:4px">🚫 SUSPENDED</span>':'';
+      return`<div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;padding:5px 0;border-bottom:1px solid #eee"><span style="font-size:12px;font-weight:600;min-width:84px">${esc(jerseyLabel(name,teamId))}${suspendedTag}</span>${stats}${cards}</div>`;
     }).join('');
     return`<div style="margin-bottom:8px"><div style="font-size:11px;color:#888;margin-bottom:2px">${esc(state.teamNames[teamId])}</div>${rows}</div>`;
   }).join('');
   return`${btn}<div class="edit-section" style="margin-top:8px">
-    <div class="customko-hint" style="margin-bottom:6px">🛡️ Tackle · 🧱 Clearance/Block · 🧤 Save · 🔑 Key pass · ❌ Error. Tap + the instant it happens -- ratings recalculate automatically, same as the Lineup tab's Match Stats panel.</div>
+    <div class="customko-hint" style="margin-bottom:6px">🛡️ Tackle · 🧱 Clearance/Block · 🧤 Save · 🔑 Key pass · ❌ Error${showCards?' · 🟨 Yellow · 🟥 Red (2nd yellow this match? tap Red too)':''}. Tap + the instant it happens -- ratings recalculate automatically, same as the Lineup tab's Match Stats panel.</div>
     ${sides}
   </div>`;
 }
@@ -6717,6 +6854,13 @@ function getPlayerCardData(name){
     goals:career?career.goals:0,
     assists:career?career.assists:0,
     cleanSheets:career?career.cleanSheets:0,
+    tackles:career?career.tackles:0,
+    clearances:career?career.clearances:0,
+    saves:career?career.saves:0,
+    keyPasses:career?career.keyPasses:0,
+    errors:career?career.errors:0,
+    yellowCards:career?career.yellowCards:0,
+    redCards:career?career.redCards:0,
     avg:career?career.avg:null,
     matches:career?career.matches:0,
     tournaments:career?career.tournaments:0,
@@ -6973,6 +7117,24 @@ function barColor(val){
   if(val>=55)return[214,166,40];
   return[210,90,70];
 }
+// jsPDF's built-in Helvetica/core fonts only support WinAnsi encoding -- any emoji or other
+// pictographic Unicode character passed to doc.text()/autoTable renders as garbled bytes (this is
+// what produced the "&½ BALLRR" / "Ø=ÜÍ 6-a-side" corruption a user reported seeing in a real
+// generated report). Every dynamic string that reaches the PDF should be run through this first.
+// Strips emoji/symbol/dingbat/arrow ranges and variation selectors, then collapses whatever
+// whitespace that leaves behind so labels like the stripped form-arrow ("On the rise") stay clean.
+function pdfSafeText(s){
+  if(s==null)return'';
+  return String(s)
+    .replace(/[\u{1F000}-\u{1FFFF}]/gu,'')
+    .replace(/[←-⇿]/g,'')
+    .replace(/[⌀-➿]/g,'')
+    .replace(/[⬀-⯿]/g,'')
+    .replace(/[︀-️]/g,'')
+    .replace(/‍/g,'')
+    .replace(/\s{2,}/g,' ')
+    .trim();
+}
 
 // ---- Player scouting report -------------------------------------------------------------------
 // Shared "finish" step once a card's base identity/stat fields are populated (this varies by
@@ -7035,6 +7197,8 @@ function buildHostPlayerReportData(name){
     name:career.name,team:career.team||'Unknown',teamId:null,
     position:career.position||'MID',
     goals:career.goals,assists:career.assists,cleanSheets:career.cleanSheets,
+    tackles:career.tackles||0,clearances:career.clearances||0,saves:career.saves||0,keyPasses:career.keyPasses||0,errors:career.errors||0,
+    yellowCards:career.yellowCards||0,redCards:career.redCards||0,
     avg:career.avg,matches:career.matches,tournaments:career.tournaments,
     badges:[],
     archetypes:computeHostCareerArchetypes(list).filter(a=>a.name===nm),
@@ -7052,6 +7216,8 @@ async function buildVerifiedPlayerReportData(uid){
     name:career.name,team:career.team||'Unknown',
     position:'MID',
     goals:career.goals,assists:career.assists,cleanSheets:career.cleanSheets,
+    tackles:career.tackles||0,clearances:career.clearances||0,saves:career.saves||0,keyPasses:career.keyPasses||0,errors:career.errors||0,
+    yellowCards:career.yellowCards||0,redCards:career.redCards||0,
     avg:career.avg,matches:career.matches,tournaments:career.tournaments,
     archetypes:[],achievements:[],trophies:null,
     form:computeFormFromRatings(career.matchRatings),
@@ -7060,6 +7226,34 @@ async function buildVerifiedPlayerReportData(uid){
   // No per-organizer tournament breakdown is exposed on the aggregated verified-card object, so
   // there's no appearance table to build here -- just the identity/stat/attribute sections.
   return finalizePlayerReportData(d,[]);
+}
+// Curates the flat archetypes+badges+achievements pile into a report-appropriate tag list.
+// achievementBadgeDefs() intentionally keeps every tier a player has crossed (e.g. a 25-goal
+// scorer holds "On the Scoresheet" AND "Golden Boot Contender" AND "Goal Machine" simultaneously)
+// so the in-app trophy case can show progression -- but a printed scouting report listing all
+// three redundant tiers reads as padding, not substance. This keeps only the HIGHEST tier per
+// stat family, then caps the combined list so the report stays skimmable.
+const ACHIEVEMENT_TIER_FAMILIES=[
+  ['On the Scoresheet','Golden Boot Contender','Goal Machine'],
+  ['Provider','Chief Creator'],
+  ['Safe Hands','Iron Wall'],
+  ['Regular','Veteran'],
+  ['Trophy Winner','Serial Winner']
+];
+function curateReportTags(d){
+  const achievements=d.achievements||[];
+  const familyLabels=new Set(ACHIEVEMENT_TIER_FAMILIES.flat());
+  const kept=[];
+  ACHIEVEMENT_TIER_FAMILIES.forEach(fam=>{
+    for(let i=fam.length-1;i>=0;i--){
+      if(achievements.some(a=>a.label===fam[i])){kept.push(fam[i]);break;}
+    }
+  });
+  achievements.forEach(a=>{if(!familyLabels.has(a.label))kept.push(a.label);});
+  const archetypeLabels=(d.archetypes||[]).map(a=>a.label);
+  const badgeLabels=(d.badges||[]).map(b=>b.label);
+  const MAX_TAGS=8;
+  return[...archetypeLabels,...kept,...badgeLabels].slice(0,MAX_TAGS).map(pdfSafeText).filter(Boolean);
 }
 function generatePlayerReportPdf(d){
   const{jsPDF}=window.jspdf;
@@ -7074,7 +7268,7 @@ function generatePlayerReportPdf(d){
   doc.setTextColor(255,255,255);
   doc.setFont('helvetica','bold');
   doc.setFontSize(18);
-  doc.text('⚽ BALLRR',margin,14);
+  doc.text('BALLRR',margin,14);
   doc.setFont('helvetica','normal');
   doc.setFontSize(9.5);
   doc.text('PLAYER SCOUTING REPORT',margin,21);
@@ -7084,25 +7278,29 @@ function generatePlayerReportPdf(d){
   doc.setFont('helvetica','bold');
   doc.setFontSize(10);
   doc.setTextColor(255,255,255);
-  doc.text((tier.name||'').toUpperCase(),pw-margin,14,{align:'right'});
+  doc.text(pdfSafeText((tier.name||'').toUpperCase()),pw-margin,14,{align:'right'});
   doc.setFont('helvetica','normal');
   doc.setFontSize(7.5);
   doc.setTextColor(190,195,205);
   doc.text('CONFIDENTIAL PLAYER PORTFOLIO',pw-margin,21,{align:'right'});
 
   let y=42;
+  // OVR box geometry is computed before the identity text so the name/position/team lines can be
+  // constrained to stop short of it -- a long team or player name previously ran straight under
+  // the box with no width limit, which is the "odd alignment" a user flagged in a real report.
+  const ovrBoxW=28,ovrBoxH=28,ovrX=pw-margin-ovrBoxW,ovrY=y-15;
+  const identityMaxW=ovrX-margin-6;
   doc.setFont('helvetica','bold');
   doc.setFontSize(20);
   doc.setTextColor(20,24,34);
-  doc.text(d.name,margin,y);
+  doc.text(pdfSafeText(d.name),margin,y,{maxWidth:identityMaxW});
   doc.setFont('helvetica','normal');
   doc.setFontSize(10.5);
   doc.setTextColor(90,95,105);
-  doc.text(`${d.position} · ${d.team}`,margin,y+7);
+  doc.text(pdfSafeText(`${d.position} · ${d.team}`),margin,y+7,{maxWidth:identityMaxW});
   doc.setFontSize(9);
-  doc.text(`${d.matches} match${d.matches===1?'':'es'} · ${d.tournaments} tournament${d.tournaments===1?'':'s'}`,margin,y+13);
+  doc.text(`${d.matches} match${d.matches===1?'':'es'} · ${d.tournaments} tournament${d.tournaments===1?'':'s'}`,margin,y+13,{maxWidth:identityMaxW});
 
-  const ovrBoxW=28,ovrBoxH=28,ovrX=pw-margin-ovrBoxW,ovrY=y-15;
   doc.setDrawColor(200,200,210);
   doc.setLineWidth(0.4);
   doc.roundedRect(ovrX,ovrY,ovrBoxW,ovrBoxH,2,2,'S');
@@ -7174,11 +7372,61 @@ function generatePlayerReportPdf(d){
   });
   y+=Math.ceil(stats.length/3)*rowH+6;
 
-  const tags=[
-    ...d.archetypes.map(a=>a.label),
-    ...(d.badges||[]).map(b=>b.label),
-    ...(d.achievements||[]).map(a=>a.label)
+  // Defensive & technical actions -- the stats a scout actually needs to justify a defender's or
+  // keeper's position (tackles/clearances/saves/key passes/errors), now tracked live on the
+  // Matches tab and persisted through snapshotCurrentTournament()/aggregateContribTotals(). Only
+  // shown when there's at least one logged action, so an attacker's report (or an older record
+  // saved before this tracking existed) doesn't show a wall of zeroes.
+  const defStats=[
+    ['Tackles',d.tackles||0],['Clearances',d.clearances||0],['Saves',d.saves||0],
+    ['Key Passes',d.keyPasses||0],['Errors',d.errors||0]
   ];
+  if(defStats.some(([,v])=>v>0)){
+    if(y>ph-50){doc.addPage();y=20;}
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(11);
+    doc.setTextColor(20,24,34);
+    doc.text('DEFENSIVE & TECHNICAL ACTIONS',margin,y);
+    y+=5;
+    defStats.forEach(([label,val],i)=>{
+      const col=i%3,row=Math.floor(i/3);
+      const bx=margin+col*colW,by=y+row*rowH;
+      doc.setDrawColor(225,225,232);
+      doc.setFillColor(248,248,250);
+      doc.roundedRect(bx,by,colW-4,rowH-4,1.5,1.5,'FD');
+      doc.setFont('helvetica','bold');
+      doc.setFontSize(13);
+      doc.setTextColor(20,24,34);
+      doc.text(String(val),bx+5,by+8);
+      doc.setFont('helvetica','normal');
+      doc.setFontSize(7.5);
+      doc.setTextColor(120,120,130);
+      doc.text(label.toUpperCase(),bx+5,by+13.5);
+    });
+    y+=Math.ceil(defStats.length/3)*rowH+6;
+  }
+
+  // Discipline (yellow/red cards) -- competitive-mode-only data (see isFriendlyMode() gating in
+  // defStatsPanelHtml()/bumpCardAndRender()), so this is naturally empty/hidden for a friendly
+  // player's report and only appears once a competitive-mode player has actually picked up a
+  // card. These are CAREER totals (same scope as every other stat on this report), not a live
+  // "banned for the next match" read -- that tournament-scoped flag only makes sense in-app,
+  // where isPlayerSuspended() is shown next to the player's name in the live squad picker.
+  if((d.yellowCards||0)>0||(d.redCards||0)>0){
+    if(y>ph-30){doc.addPage();y=20;}
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(11);
+    doc.setTextColor(20,24,34);
+    doc.text('DISCIPLINE',margin,y);
+    y+=6;
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(60,60,68);
+    doc.text(`${d.yellowCards||0} yellow card${(d.yellowCards||0)===1?'':'s'} · ${d.redCards||0} red card${(d.redCards||0)===1?'':'s'} (career)`,margin,y);
+    y+=10;
+  }
+
+  const tags=curateReportTags(d);
   if(tags.length){
     doc.setFont('helvetica','bold');
     doc.setFontSize(11);
@@ -7209,7 +7457,7 @@ function generatePlayerReportPdf(d){
     doc.autoTable({
       startY:y+3,margin:{left:margin,right:margin},
       head:[['Award','Count']],
-      body:Object.keys(d.trophies.wins).map(label=>[label,String(d.trophies.wins[label])+'×']),
+      body:Object.keys(d.trophies.wins).map(label=>[pdfSafeText(label),String(d.trophies.wins[label])+'x']),
       theme:'grid',headStyles:{fillColor:[20,24,34],fontSize:8.5},bodyStyles:{fontSize:8.5},styles:{cellPadding:2.4}
     });
     y=doc.lastAutoTable.finalY+8;
@@ -7224,7 +7472,7 @@ function generatePlayerReportPdf(d){
     doc.setFont('helvetica','normal');
     doc.setFontSize(9);
     doc.setTextColor(90,95,105);
-    doc.text(d.form.label+' '+d.form.arrow,margin+38,y);
+    doc.text(pdfSafeText(d.form.label),margin+38,y);
     y+=6;
     let fx=margin;
     d.form.dots.forEach(r=>{
@@ -7251,11 +7499,11 @@ function generatePlayerReportPdf(d){
     doc.setFont('helvetica','normal');
     doc.setFontSize(9);
     doc.setTextColor(120,120,130);
-    doc.text(d.name+' · '+d.appearances.length+' entr'+(d.appearances.length===1?'y':'ies'),margin,26);
+    doc.text(pdfSafeText(d.name)+' · '+d.appearances.length+' entr'+(d.appearances.length===1?'y':'ies'),margin,26);
     doc.autoTable({
       startY:32,margin:{left:margin,right:margin},
       head:[['Date','Event','Matches','Goals','Assists','Avg Rating']],
-      body:d.appearances.map(a=>[a.date||'—',a.label,String(a.matches),String(a.goals),String(a.assists),a.avg!=null?a.avg.toFixed(2):'—']),
+      body:d.appearances.map(a=>[a.date||'—',pdfSafeText(a.label),String(a.matches),String(a.goals),String(a.assists),a.avg!=null?a.avg.toFixed(2):'—']),
       theme:'striped',headStyles:{fillColor:[20,24,34],fontSize:8.5},bodyStyles:{fontSize:8.5},styles:{cellPadding:2.6},
       didDrawPage:()=>pdfFooter(doc,pw,ph)
     });
@@ -7317,6 +7565,17 @@ function buildTournamentReportData(entry){
     topScorers:rows.filter(r=>r.goals>0).sort((a,b)=>b.goals-a.goals).slice(0,5),
     topAssists:rows.filter(r=>r.assists>0).sort((a,b)=>b.assists-a.assists).slice(0,5),
     topCleanSheets:rows.filter(r=>r.cleanSheets>0).sort((a,b)=>b.cleanSheets-a.cleanSheets).slice(0,5),
+    // Same idea as topScorers/topAssists above, but for the defensive/technical actions logged
+    // live on the Matches tab -- without these a tournament report only ever tells a scout who
+    // attacked well, never who defended well, which is exactly the gap flagged in a real report.
+    topTackles:rows.filter(r=>r.tackles>0).sort((a,b)=>b.tackles-a.tackles).slice(0,5),
+    topSaves:rows.filter(r=>r.saves>0).sort((a,b)=>b.saves-a.saves).slice(0,5),
+    topClearances:rows.filter(r=>r.clearances>0).sort((a,b)=>b.clearances-a.clearances).slice(0,5),
+    topKeyPasses:rows.filter(r=>r.keyPasses>0).sort((a,b)=>b.keyPasses-a.keyPasses).slice(0,5),
+    // Competitive-mode-only (cards are never logged in friendly mode -- see isFriendlyMode()
+    // gating in defStatsPanelHtml()), so this is naturally empty for a friendly tournament.
+    discipline:rows.filter(r=>(r.yellowCards||0)>0||(r.redCards||0)>0)
+      .sort((a,b)=>(b.redCards-a.redCards)||(b.yellowCards-a.yellowCards)).slice(0,8),
     awards:computeTournamentAwardsFromPlayerStats(entry.playerStats)
   };
 }
@@ -7332,7 +7591,7 @@ function generateTournamentReportPdf(t){
   doc.setTextColor(255,255,255);
   doc.setFont('helvetica','bold');
   doc.setFontSize(18);
-  doc.text('⚽ BALLRR',margin,14);
+  doc.text('BALLRR',margin,14);
   doc.setFont('helvetica','normal');
   doc.setFontSize(9.5);
   doc.text('TOURNAMENT REPORT',margin,21);
@@ -7344,16 +7603,16 @@ function generateTournamentReportPdf(t){
   doc.setFont('helvetica','bold');
   doc.setFontSize(18);
   doc.setTextColor(20,24,34);
-  doc.text(t.label,margin,y);
+  doc.text(pdfSafeText(t.label),margin,y,{maxWidth:pw-margin*2});
   doc.setFont('helvetica','normal');
   doc.setFontSize(10);
   doc.setTextColor(90,95,105);
-  doc.text(`${t.date||'—'} · ${t.format}`,margin,y+7);
+  doc.text(pdfSafeText(`${t.date||'—'} · ${t.format}`),margin,y+7);
   if(t.champion){
     doc.setFont('helvetica','bold');
     doc.setFontSize(10.5);
     doc.setTextColor(180,140,20);
-    doc.text('🏆 Champion: '+t.champion,margin,y+14);
+    doc.text('Champion: '+pdfSafeText(t.champion),margin,y+14);
   }
   y+=22;
   doc.setDrawColor(225,225,232);
@@ -7368,7 +7627,7 @@ function generateTournamentReportPdf(t){
     doc.autoTable({
       startY:y+3,margin:{left:margin,right:margin},
       head:[['Award','Player','Team','Detail']],
-      body:t.awards.map(a=>[a.label,a.name,a.team||'—',a.detail]),
+      body:t.awards.map(a=>[pdfSafeText(a.label),pdfSafeText(a.name),pdfSafeText(a.team)||'—',pdfSafeText(a.detail)]),
       theme:'grid',headStyles:{fillColor:[20,24,34],fontSize:8.5},bodyStyles:{fontSize:8.5},styles:{cellPadding:2.4}
     });
     y=doc.lastAutoTable.finalY+8;
@@ -7382,7 +7641,7 @@ function generateTournamentReportPdf(t){
     doc.autoTable({
       startY:y+3,margin:{left:margin,right:margin},
       head:[['#','Team','P','W','D','L','GF','GA','GD','Pts']],
-      body:t.table.map((r,i)=>[String(i+1),r.name,r.p,r.w,r.d,r.l,r.gf,r.ga,(r.gd>=0?'+':'')+r.gd,r.pts]),
+      body:t.table.map((r,i)=>[String(i+1),pdfSafeText(r.name),r.p,r.w,r.d,r.l,r.gf,r.ga,(r.gd>=0?'+':'')+r.gd,r.pts]),
       theme:'striped',headStyles:{fillColor:[20,24,34],fontSize:8},bodyStyles:{fontSize:8},styles:{cellPadding:2}
     });
     y=doc.lastAutoTable.finalY+8;
@@ -7398,7 +7657,7 @@ function generateTournamentReportPdf(t){
     doc.autoTable({
       startY:y+3,margin:{left:margin,right:margin},
       head:[['Player','Team',statLabel]],
-      body:rows.map(r=>[r.name,r.team||'—',String(r[statKey])]),
+      body:rows.map(r=>[pdfSafeText(r.name),pdfSafeText(r.team)||'—',String(r[statKey])]),
       theme:'grid',headStyles:{fillColor:[20,24,34],fontSize:8.5},bodyStyles:{fontSize:8.5},styles:{cellPadding:2.4}
     });
     y=doc.lastAutoTable.finalY+8;
@@ -7406,6 +7665,25 @@ function generateTournamentReportPdf(t){
   statTable('TOP SCORERS',t.topScorers,'goals','Goals');
   statTable('TOP ASSISTS',t.topAssists,'assists','Assists');
   statTable('TOP CLEAN SHEETS',t.topCleanSheets,'cleanSheets','Clean Sheets');
+  statTable('TOP TACKLERS',t.topTackles,'tackles','Tackles');
+  statTable('MOST SAVES',t.topSaves,'saves','Saves');
+  statTable('TOP CLEARANCES/BLOCKS',t.topClearances,'clearances','Clearances');
+  statTable('TOP KEY PASSES',t.topKeyPasses,'keyPasses','Key Passes');
+
+  if(t.discipline&&t.discipline.length){
+    if(y>ph-50){doc.addPage();y=20;}
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(11);
+    doc.setTextColor(20,24,34);
+    doc.text('DISCIPLINE',margin,y);
+    doc.autoTable({
+      startY:y+3,margin:{left:margin,right:margin},
+      head:[['Player','Team','Yellow','Red']],
+      body:t.discipline.map(r=>[pdfSafeText(r.name),pdfSafeText(r.team)||'—',String(r.yellowCards||0),String(r.redCards||0)]),
+      theme:'grid',headStyles:{fillColor:[20,24,34],fontSize:8.5},bodyStyles:{fontSize:8.5},styles:{cellPadding:2.4}
+    });
+    y=doc.lastAutoTable.finalY+8;
+  }
 
   pdfFooter(doc,pw,ph);
 
@@ -7418,7 +7696,7 @@ function generateTournamentReportPdf(t){
     doc.autoTable({
       startY:26,margin:{left:margin,right:margin},
       head:[['Stage','Home','Score','Away','Scorers']],
-      body:t.matches.map(m=>[m.stage||'League',m.teamA,`${m.scoreA} - ${m.scoreB}`,m.teamB,(m.scorers||[]).map(s=>s.name).join(', ')||'—']),
+      body:t.matches.map(m=>[pdfSafeText(m.stage)||'League',pdfSafeText(m.teamA),`${m.scoreA} - ${m.scoreB}`,pdfSafeText(m.teamB),(m.scorers||[]).map(s=>pdfSafeText(s.name)).join(', ')||'—']),
       theme:'striped',headStyles:{fillColor:[20,24,34],fontSize:8},bodyStyles:{fontSize:8},styles:{cellPadding:2},
       didDrawPage:()=>pdfFooter(doc,pw,ph)
     });
@@ -10083,7 +10361,7 @@ function buildLiveCareerRows(){
   const ratingStats=computeRatingStats();
   const rows={};
   function ensureRow(name,team){
-    if(!rows[name])rows[name]={name,team,goals:0,assists:0,cleanSheets:0,avg:null,count:0};
+    if(!rows[name])rows[name]={name,team,goals:0,assists:0,cleanSheets:0,tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,avg:null,count:0};
     if(team)rows[name].team=team;
     return rows[name];
   }
@@ -10106,6 +10384,17 @@ function buildLiveCareerRows(){
       row.avg=(row.avg*row.count+s.avg*s.count)/totalCount;
       row.count=totalCount;
     }
+  });
+  // Same defensive/technical totals snapshotCurrentTournament() persists for a SAVED tournament
+  // (see aggregateContribTotals()'s own comment) -- folded in here too so they show up on a
+  // player's card/report immediately, not just after the tournament is actually saved.
+  const contribByKey=aggregateContribTotals();
+  Object.keys(contribByKey).forEach(k=>{
+    const idx=k.lastIndexOf('||');
+    const name=k.slice(0,idx),teamId=k.slice(idx+2);
+    const row=ensureRow(name,state.teamNames[teamId]);
+    CONTRIB_STAT_KEYS.forEach(key=>{row[key]=(row[key]||0)+contribByKey[k][key];});
+    CARD_STAT_KEYS.forEach(key=>{row[key]=(row[key]||0)+(contribByKey[k][key]||0);});
   });
   return Object.values(rows);
 }
@@ -10133,7 +10422,7 @@ function collapsePlayerStatsByName(playerStats){
   (playerStats||[]).forEach(p=>{
     const nm=(p.name||'').trim();
     if(!nm)return;
-    if(!byName[nm])byName[nm]={name:nm,team:p.team,position:p.position,code:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matches:0,matchRatings:[]};
+    if(!byName[nm])byName[nm]={name:nm,team:p.team,position:p.position,code:null,goals:0,assists:0,cleanSheets:0,tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,yellowCards:0,redCards:0,ratingSum:0,ratingCount:0,matches:0,matchRatings:[]};
     const row=byName[nm];
     row.team=p.team||row.team;
     row.position=p.position||row.position;
@@ -10141,6 +10430,13 @@ function collapsePlayerStatsByName(playerStats){
     row.goals+=p.goals||0;
     row.assists+=p.assists||0;
     row.cleanSheets+=p.cleanSheets||0;
+    row.tackles+=p.tackles||0;
+    row.clearances+=p.clearances||0;
+    row.saves+=p.saves||0;
+    row.keyPasses+=p.keyPasses||0;
+    row.errors+=p.errors||0;
+    row.yellowCards+=p.yellowCards||0;
+    row.redCards+=p.redCards||0;
     row.matches+=p.count||0;
     if(p.avg!=null&&p.count){row.ratingSum+=p.avg*p.count;row.ratingCount+=p.count;}
     // Only present on snapshots saved after the per-match rating history was added -- older
@@ -10202,11 +10498,18 @@ function computeCareerLeaderboard(){
   function mergeTournament(rows,isTournamentEntry){
     rows.forEach(p=>{
       const nm=p.name;
-      if(!agg[nm])agg[nm]={name:nm,team:p.team,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0};
+      if(!agg[nm])agg[nm]={name:nm,team:p.team,goals:0,assists:0,cleanSheets:0,tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,yellowCards:0,redCards:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0};
       agg[nm].team=p.team||agg[nm].team;
       agg[nm].goals+=p.goals||0;
       agg[nm].assists+=p.assists||0;
       agg[nm].cleanSheets+=p.cleanSheets||0;
+      agg[nm].tackles+=p.tackles||0;
+      agg[nm].clearances+=p.clearances||0;
+      agg[nm].saves+=p.saves||0;
+      agg[nm].keyPasses+=p.keyPasses||0;
+      agg[nm].errors+=p.errors||0;
+      agg[nm].yellowCards+=p.yellowCards||0;
+      agg[nm].redCards+=p.redCards||0;
       agg[nm].matchesTotal+=p.matches||0;
       agg[nm].ratingSum+=p.ratingSum||0;
       agg[nm].ratingCount+=p.ratingCount||0;
@@ -11731,13 +12034,20 @@ function computeHostCareerLeaderboard(pastTournaments){
   function mergeTournament(rows,isTournamentEntry){
     rows.forEach(p=>{
       const nm=p.name;
-      if(!agg[nm])agg[nm]={name:nm,team:p.team,position:p.position,code:null,goals:0,assists:0,cleanSheets:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
+      if(!agg[nm])agg[nm]={name:nm,team:p.team,position:p.position,code:null,goals:0,assists:0,cleanSheets:0,tackles:0,clearances:0,saves:0,keyPasses:0,errors:0,yellowCards:0,redCards:0,ratingSum:0,ratingCount:0,matchesTotal:0,tournaments:0,matchRatings:[]};
       agg[nm].team=p.team||agg[nm].team;
       agg[nm].position=p.position||agg[nm].position;
       agg[nm].code=p.code||agg[nm].code;
       agg[nm].goals+=p.goals||0;
       agg[nm].assists+=p.assists||0;
       agg[nm].cleanSheets+=p.cleanSheets||0;
+      agg[nm].tackles+=p.tackles||0;
+      agg[nm].clearances+=p.clearances||0;
+      agg[nm].saves+=p.saves||0;
+      agg[nm].keyPasses+=p.keyPasses||0;
+      agg[nm].errors+=p.errors||0;
+      agg[nm].yellowCards+=p.yellowCards||0;
+      agg[nm].redCards+=p.redCards||0;
       agg[nm].matchesTotal+=p.matches||0;
       agg[nm].ratingSum+=p.ratingSum||0;
       agg[nm].ratingCount+=p.ratingCount||0;

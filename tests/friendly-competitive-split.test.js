@@ -181,6 +181,52 @@ test('toggleDefStatsPanel opens/closes per match, only one panel open at a time'
   assert.strictEqual(r.afterClose, null);
 });
 
+test('bumpCardAndRender caps yellow cards at 2 and red cards at 1 per match, and never goes below zero', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    state = { results: [{ played: false, g: [0,0], scorers: [], assists: [] }], fixtures: [[0,1]], teamNames: ['Red FC','Blue FC'], numTeams: 2 };
+    renderMatches = function(){};
+    bumpCardAndRender('league', '0', 'Keith', 'yellowCards', 1);
+    bumpCardAndRender('league', '0', 'Keith', 'yellowCards', 1);
+    bumpCardAndRender('league', '0', 'Keith', 'yellowCards', 1);
+    window.__results.yellowCapped = state.results[0].contributions['Keith'].yellowCards;
+    bumpCardAndRender('league', '0', 'Keith', 'redCards', 1);
+    bumpCardAndRender('league', '0', 'Keith', 'redCards', 1);
+    window.__results.redCapped = state.results[0].contributions['Keith'].redCards;
+    bumpCardAndRender('league', '0', 'Keith', 'redCards', -100);
+    window.__results.redFloored = state.results[0].contributions['Keith'].redCards;
+  `);
+  assert.strictEqual(r.yellowCapped, 2, 'a 3rd yellow tap should not push the tally past 2');
+  assert.strictEqual(r.redCapped, 1, 'a 2nd red tap should not push the tally past 1');
+  assert.strictEqual(r.redFloored, 0, 'decrementing far past zero must clamp at 0');
+});
+
+test('playerDisciplineTotals sums yellow/red cards across every played match this tournament, optionally scoped to one team, and isPlayerSuspended flags a red card or 3+ accumulated yellows -- but only in competitive mode', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    state = {
+      mode: 'competitive',
+      results: [
+        { played: true, g:[1,0], scorers:[], assists:[], contributions: { Keith: { yellowCards: 2, redCards: 0 } } },
+        { played: true, g:[0,1], scorers:[], assists:[], contributions: { Keith: { yellowCards: 1, redCards: 0 }, Densil: { yellowCards: 0, redCards: 1 } } }
+      ],
+      fixtures: [[0,1],[0,1]], teamNames: ['Red FC','Blue FC'], numTeams: 2, customKO: null
+    };
+    window.__results.keithTotals = playerDisciplineTotals('Keith', 0);
+    window.__results.keithSuspendedComp = isPlayerSuspended('Keith', 0);
+    window.__results.densilSuspendedComp = isPlayerSuspended('Densil', 1);
+    window.__results.unbookedSuspended = isPlayerSuspended('Nobody', 0);
+    state.mode = 'friendly';
+    window.__results.keithSuspendedFriendly = isPlayerSuspended('Keith', 0);
+  `);
+  assert.strictEqual(r.keithTotals.yellowCards, 3, '2 + 1 across two matches');
+  assert.strictEqual(r.keithTotals.redCards, 0);
+  assert.strictEqual(r.keithSuspendedComp, true, '3 accumulated yellows should flag a suspension in competitive mode');
+  assert.strictEqual(r.densilSuspendedComp, true, 'a single red card should flag a suspension');
+  assert.strictEqual(r.unbookedSuspended, false);
+  assert.strictEqual(r.keithSuspendedFriendly, false, 'suspension tracking is competitive-mode only -- friendly mode must always read false');
+});
+
 test('renderModeBadge shows the active mode in words, not just color', () => {
   const { window } = freshWindow({ extraHtml: '<span id="app-mode-badge"></span>' });
   const r = runInOneEval(window, `
