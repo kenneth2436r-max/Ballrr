@@ -13370,11 +13370,24 @@ document.getElementById('cfg-legs').addEventListener('change',updateFormatInfo);
     const d=el.style.display;
     return d==='flex'||d==='block';
   }
+  // BUG FIX: this observer watches the `style` attribute, but the callback below itself writes
+  // el.style.zIndex -- which IS a style-attribute mutation. Without guarding against that, every
+  // write re-triggers the same observer, which writes again, forever: a self-sustaining
+  // MutationObserver microtask loop that never yields back to the browser's render/input loop.
+  // In practice this is a full app freeze the instant ANY modal opens (confirmed by reproducing
+  // the exact pattern in isolation -- it starves even a 200ms setTimeout indefinitely, since
+  // microtasks are always drained before timers get a turn), which matches "freezes after a few
+  // touches no matter which tab" exactly, since nearly every tab has at least one popup.
+  // Fix: disconnect the observer for the moment we make our own write, then immediately
+  // re-observe -- so our own mutation is never delivered back to this callback, while genuine
+  // future display changes (the modal closing/reopening later) still are.
   document.querySelectorAll('.modal-overlay').forEach(el=>{
     const observer=new MutationObserver(()=>{
       if(isVisible(el)){
+        observer.disconnect();
         topZ+=1;
         el.style.zIndex=String(topZ);
+        observer.observe(el,{attributes:true,attributeFilter:['style']});
       }
     });
     observer.observe(el,{attributes:true,attributeFilter:['style']});
