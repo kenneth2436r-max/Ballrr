@@ -8273,6 +8273,22 @@ function captureCheckinParamFromUrl(){
     // box in Settings -- shareFollowHostLink() below is what generates this.
     const followHostCode=params.get('followhost');
     if(followHostCode)pendingFollowHostCode=followHostCode.trim().toUpperCase();
+    // BUG FIX: strip these one-time action params from the URL right after reading them, via
+    // history.replaceState (no new history entry, no navigation/reload). Without this, the
+    // browser/WebView keeps e.g. ?follow=CODE in its address bar forever -- since this whole app
+    // is one static page (Capacitor's server.url just points at it), the URL never naturally
+    // changes on its own. That means ANY later reload of this exact page -- the OS reclaiming a
+    // backgrounded WebView, force-closing and reopening the app, a manual refresh -- re-runs this
+    // function from scratch, reads the SAME still-present ?follow=CODE, and silently re-follows
+    // that tournament again, even after the visitor explicitly tapped "Stop following"/"Leave"
+    // moments (or days) before. From the visitor's side that reads as "the Leave button doesn't
+    // work -- I'm stuck in view-only mode", which is exactly what was reported.
+    if(code||followCode||joinCode||followHostCode){
+      ['checkin','follow','join','followhost'].forEach(k=>params.delete(k));
+      const qs=params.toString();
+      const cleanUrl=window.location.pathname+(qs?'?'+qs:'')+window.location.hash;
+      window.history.replaceState(null,'',cleanUrl);
+    }
   }catch(e){}
 }
 captureCheckinParamFromUrl();
