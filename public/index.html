@@ -140,8 +140,17 @@ body.viewer-mode .viewer-banner{display:flex}
    this is purely so the UI doesn't invite taps that would silently do nothing. Nav chrome
    (sidebar, tabs, modals, the cue-card/commentary toasts) lives outside .section so it's
    unaffected, and help FAQ toggles / player-name links are deliberately left interactive since
-   they're read-only actions. */
-body.viewer-mode .section button:not(.tab):not(.help-faq-q),
+   they're read-only actions.
+   BUG FIX: this blanket selector was also catching "Stop following (back to your own
+   tournament)" (Settings tab, inside .section like everything else) -- a plain <button> with no
+   exemption, so it silently went pointer-events:none the moment viewer-mode turned on, i.e. the
+   INSTANT you became a follower. That's the button that's supposed to get you OUT of view-only
+   mode, so followers had no way back to their own tournament (reported as "the Leave button
+   doesn't work, I'm stuck in view-only mode"). .viewer-exit-btn marks the small set of
+   navigate-away controls (Stop following a tournament, Stop following a host, Leave) that must
+   always stay tappable regardless of viewer-mode, same reasoning as the #lineup-select and
+   fan-prediction exemptions below. */
+body.viewer-mode .section button:not(.tab):not(.help-faq-q):not(.viewer-exit-btn),
 body.viewer-mode .section input,
 body.viewer-mode .section select,
 body.viewer-mode .section textarea{
@@ -11951,7 +11960,7 @@ function renderHostFollowBlock(){
       </div>`;
     }
     html+='<button class="theme-btn" style="width:100%;margin-top:8px" onclick="showHostPastTournaments()">\ud83d\udc64 View their profile</button>';
-    html+='<button class="pc-btn pc-btn-close" style="width:100%;margin-top:8px" onclick="unfollowHost()">Stop following</button>';
+    html+='<button class="pc-btn pc-btn-close viewer-exit-btn" style="width:100%;margin-top:8px" onclick="unfollowHost()">Stop following</button>';
   }else{
     html+=`<div class="edit-row">
       <input type="text" id="follow-host-input" placeholder="Host code" maxlength="6" style="text-transform:uppercase">
@@ -12489,7 +12498,7 @@ function renderSharedSection(){
         <div style="font-size:28px">\ud83d\udc40</div>
       </div>
       <p style="font-size:12px;color:var(--text-muted);margin:8px 0">Organizer: ${esc(sharedMeta.ownerName)} \u00b7 view only \u2014 you'll get live commentary pop-ups as things happen, but can't edit anything here.</p>
-      <button class="pc-btn pc-btn-close" style="width:100%;margin-top:10px" onclick="unfollowSharedTournament()">Stop following (back to your own tournament)</button>
+      <button class="pc-btn pc-btn-close viewer-exit-btn" style="width:100%;margin-top:10px" onclick="unfollowSharedTournament()">Stop following (back to your own tournament)</button>
       ${renderHostFollowBlock()}
     `;
     return;
@@ -12545,7 +12554,7 @@ function renderSharedSection(){
     ${followerChips?`<div class="edit-title" style="margin-top:10px">Following (view only)</div><div class="chip-wrap" style="margin-bottom:10px">${followerChips}</div>`:''}
     ${isMember?`<button class="theme-btn" style="width:100%;margin-top:10px" onclick="copySharedHistoryToMyArchive()">📋 Copy history to my own Archive</button>
     <p style="font-size:11px;color:var(--text-faint);margin:4px 0 0">Only whoever eventually disbands this session gets their own permanent copy automatically -- tap this any time to make sure YOUR Archive and career stats stay current too, even if you're not the one who ends it.</p>`:''}
-    <button class="pc-btn pc-btn-close" style="width:100%;margin-top:10px" onclick="leaveSharedTournament()">Leave (back to your own tournament)</button>
+    <button class="pc-btn pc-btn-close viewer-exit-btn" style="width:100%;margin-top:10px" onclick="leaveSharedTournament()">Leave (back to your own tournament)</button>
     ${isOwner?`<button class="pc-btn" style="width:100%;margin-top:8px;background:none;color:#e05252;border:1.5px solid #e05252" onclick="disbandSharedTournament()">Disband tournament for everyone</button>`:''}
     ${renderHostFollowBlock()}
   `;
