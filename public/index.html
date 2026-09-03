@@ -228,8 +228,14 @@ button:active,.tab:active,.chip button:active{transform:scale(0.94)}
 .player-card{width:100%;max-width:300px;display:inline-flex;flex-direction:column;align-items:center;text-align:left;margin:20px auto;animation:cardPop 0.35s cubic-bezier(.34,1.56,.64,1)}
 @keyframes cardPop{0%{opacity:0;transform:scale(0.85) translateY(20px)}100%{opacity:1;transform:scale(1) translateY(0)}}
 .fifa-card{position:relative;width:280px;height:412px;clip-path:polygon(10% 0%,90% 0%,100% 10%,100% 78%,50% 100%,0% 78%,0% 10%);padding:20px 18px 26px;box-shadow:0 20px 50px rgba(0,0,0,0.5);overflow:hidden}
-.fifa-card::before{content:'';position:absolute;top:0;left:-30%;width:60%;height:100%;background:linear-gradient(115deg,rgba(255,255,255,0) 30%,rgba(255,255,255,0.35) 48%,rgba(255,255,255,0) 66%);animation:fifaShine 2.6s ease-in-out infinite;pointer-events:none}
-@keyframes fifaShine{0%{left:-40%}100%{left:120%}}
+/* PERFORMANCE: this shine sweep used to animate `left` -- a layout-affecting property, so an
+   otherwise-idle FIFA card modal was forcing a full reflow on the browser's main thread every
+   single frame, forever, for as long as it stayed open (infinite animation). Switched to
+   `transform: translateX()`, which the compositor can run entirely on its own thread with no
+   layout/paint cost at all -- same visual sweep, effectively free. will-change hints the browser
+   to promote this layer up front rather than discovering the need for a new layer on first frame. */
+.fifa-card::before{content:'';position:absolute;top:0;left:0;width:60%;height:100%;background:linear-gradient(115deg,rgba(255,255,255,0) 30%,rgba(255,255,255,0.35) 48%,rgba(255,255,255,0) 66%);transform:translateX(-112px);animation:fifaShine 2.6s ease-in-out infinite;pointer-events:none;will-change:transform}
+@keyframes fifaShine{0%{transform:translateX(-112px)}100%{transform:translateX(336px)}}
 .tier-special{background:linear-gradient(160deg,#3a3216 0%,#171408 55%,#000 100%)}
 .tier-potm{background:linear-gradient(160deg,#8a3ff2 0%,#5a1bb0 55%,#25105a 100%)}
 .tier-gold{background:linear-gradient(160deg,#f9e58c 0%,#d9a52b 55%,#8a5f12 100%)}
@@ -2226,6 +2232,49 @@ if(typeof window!=='undefined'&&window.addEventListener){
   // entirely on some navigation-away paths -- belt and suspenders with the listener above.
   window.addEventListener('pagehide',flushLocalSaveNow);
 }
+
+// PERFORMANCE (dev-only instrumentation): times the app's hot render functions and warns in the
+// console when one blows past a single frame's budget (16ms). Completely inert for a normal
+// user -- isPerfDebugEnabled() short-circuits everything below to a no-op unless explicitly
+// turned on via ?perf=1 in the URL or a localStorage flag, so this ships in every build with zero
+// runtime cost by default. Exists so a future change's perf impact ("did this make renderMatches
+// slower") can be checked directly instead of guessing -- open the app with ?perf=1, use it
+// normally, then read window.__ballrrPerfStats (count/total/max ms per function) from the console.
+function isPerfDebugEnabled(){
+  try{
+    if(typeof location!=='undefined'&&/[?&]perf=1(?:&|$)/.test(location.search))return true;
+    if(typeof localStorage!=='undefined'&&localStorage.getItem('ballrr_perf_debug_v1')==='1')return true;
+  }catch(e){}
+  return false;
+}
+const ballrrPerfStats={};
+function recordPerfSample(name,ms){
+  const s=ballrrPerfStats[name]||(ballrrPerfStats[name]={count:0,totalMs:0,maxMs:0});
+  s.count++;s.totalMs+=ms;if(ms>s.maxMs)s.maxMs=ms;
+}
+// Wraps each named function (must already be defined as a top-level `function` -- those attach to
+// `window` in a real browser) so every call is timed and tallied into ballrrPerfStats, and logs a
+// console warning for any single call that exceeds one 60fps frame's budget. Idempotent-ish by
+// design intent (call once at startup) -- calling twice would double-wrap and double-count, so
+// this is only ever invoked from the single guarded call below.
+function instrumentRenderPerf(names){
+  if(!isPerfDebugEnabled())return;
+  names.forEach(name=>{
+    const orig=(typeof window!=='undefined'?window:globalThis)[name];
+    if(typeof orig!=='function')return;
+    const wrapped=function(...args){
+      const t0=(typeof performance!=='undefined'?performance.now():Date.now());
+      const result=orig.apply(this,args);
+      const ms=(typeof performance!=='undefined'?performance.now():Date.now())-t0;
+      recordPerfSample(name,ms);
+      if(ms>16)console.warn('[ballrr perf] '+name+'() took '+ms.toFixed(1)+'ms (over one frame\'s 16ms budget)');
+      return result;
+    };
+    (typeof window!=='undefined'?window:globalThis)[name]=wrapped;
+  });
+  (typeof window!=='undefined'?window:globalThis).__ballrrPerfStats=ballrrPerfStats;
+}
+instrumentRenderPerf(['renderMatches','renderKnockout','renderCareer','renderArchive','renderProfile','renderReelsFeed','renderLineups','renderAll','renderScorers']);
 
 let sharedPayloadFirstLoad=true;
 function subscribeSharedPayload(code){
