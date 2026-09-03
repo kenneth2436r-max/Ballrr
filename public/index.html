@@ -738,6 +738,7 @@ select option{background:var(--input-bg);color:var(--text)}
 <nav id="sidebar" class="sidebar">
   <div class="sidebar-title">Menu</div>
   <button class="tab active" onclick="showTab('home',this)">🏠 Home</button>
+  <button class="tab" onclick="showTab('livenow',this)">🔴 Live</button>
   <button class="tab" onclick="showTab('activity',this)">🔔 Activity</button>
   <button class="tab" onclick="showTab('table',this)">📊 Table</button>
   <button class="tab" onclick="showTab('matches',this)">⚽ Matches</button>
@@ -754,6 +755,13 @@ select option{background:var(--input-bg);color:var(--text)}
 <!-- HOME -->
 <div id="tab-home" class="section active">
   <div id="home-container"></div>
+</div>
+
+<!-- LIVE NOW (Phase 3 roadmap: a dedicated hub for "what's live right now", instead of having to
+     scan the Matches tab for badges -- see renderLiveNow()'s own comment for what it does and
+     doesn't cover.) -->
+<div id="tab-livenow" class="section">
+  <div id="live-now-container"></div>
 </div>
 
 <!-- ACTIVITY (lite -- pending join/view requests + your own followers list, both already-live
@@ -2284,7 +2292,7 @@ function instrumentRenderPerf(names){
   });
   (typeof window!=='undefined'?window:globalThis).__ballrrPerfStats=ballrrPerfStats;
 }
-instrumentRenderPerf(['renderMatches','renderKnockout','renderCareer','renderArchive','renderProfile','renderReelsFeed','renderLineups','renderAll','renderScorers']);
+instrumentRenderPerf(['renderMatches','renderKnockout','renderCareer','renderArchive','renderProfile','renderReelsFeed','renderLineups','renderAll','renderScorers','renderLiveNow']);
 
 let sharedPayloadFirstLoad=true;
 function subscribeSharedPayload(code){
@@ -4195,6 +4203,68 @@ function nextUpMatchBannerHtml(){
 function scrollToMatchCard(mi){
   const el=document.getElementById('match-card-'+mi);
   if(el&&el.scrollIntoView)el.scrollIntoView({behavior:'smooth',block:'start'});
+}
+// PHASE 3 -- "dedicated Live Now hub page" + "cleaner live match presentation": before this, the
+// only way to see what's live right now was to open the Matches tab and scan every card for the
+// (Phase 2) LIVE badge. This pulls every currently-live league match into one focused list, plus
+// this device's own "live for followers" status and a followed host's live notice if there is
+// one -- all from data already tracked locally (myLiveAnnounced/myLatestCode/hostFollowNotice),
+// no new Firestore reads or listeners added.
+//
+// Deliberately scoped to LEAGUE fixtures only, same call nextUpMatchInfo() already made -- a pure
+// knockout tournament's live matches still get their own LIVE badge right on the Matches tab, just
+// not pulled into this hub yet (walking every knockout format -- custom stages, the 3-team
+// playoff, and the standard bracket -- needs the same branching allPlayedMatchesWithTeams() uses,
+// which is out of scope for this pass to avoid touching that heavily-depended-on function).
+//
+// Also deliberately does NOT add a public tournament discovery/directory (browsing strangers'
+// live tournaments, the way some other tracker apps do). Ballrr's invite/follow-only model is a
+// real product decision with real privacy implications -- that's the app owner's call to make
+// explicitly, not something to slip in silently while building a "what's live" page.
+function collectMyLiveLeagueMatches(){
+  const list=[];
+  if(state.formatType==='knockout'||!state.fixtures||!state.results)return list;
+  state.fixtures.forEach((m,mi)=>{
+    const r=state.results[mi];
+    if(r&&r.timer&&r.timer.running){
+      const liveScore=calcMatchScore(state.results,mi,state.fixtures);
+      list.push({mi,teamA:teamLabel(m[0]),teamB:teamLabel(m[1]),scoreA:liveScore[0],scoreB:liveScore[1],elapsedMs:computeTimerElapsedMs(r.timer)});
+    }
+  });
+  return list;
+}
+function renderLiveNow(){
+  const el=document.getElementById('live-now-container');
+  if(!el)return;
+  let html='';
+  if(myLiveAnnounced&&myLatestCode){
+    html+=`<div class="shared-pending-banner" style="background:rgba(46,204,113,0.15);border-color:rgba(46,204,113,0.45);margin-bottom:10px">
+      <div style="font-weight:700">🔴 You're live${myLatestVisibility==='private'?' (private)':''}</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${esc(myLatestLabel||'Your tournament')} is showing as live to your followers right now.</div>
+    </div>`;
+  }
+  if(hostFollowNotice){
+    html+=`<div class="shared-pending-banner" style="margin-bottom:10px;cursor:pointer" onclick="openFollowedHostNotice()">
+      <div style="font-weight:700">📢 ${esc(hostFollowNotice.hostName||'Someone you follow')} just went live</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${hostFollowNotice.visibility==='private'?'Tap to ask to view.':'Tap to jump in.'}</div>
+    </div>`;
+  }
+  const liveMatches=collectMyLiveLeagueMatches();
+  if(!liveMatches.length){
+    html+=`<div class="empty-msg">No matches live right now${state.formatType==='knockout'?' (check the Matches tab -- the knockout bracket shows its own LIVE badges there)':''}. Start a match's timer from the Matches tab and it'll show up here.</div>`;
+  }else{
+    html+=liveMatches.map(lm=>`<div class="match-card match-card-live" onclick="showTab('matches');scrollToMatchCard(${lm.mi})" style="cursor:pointer">
+      <div class="match-label"><span class="live-badge">🔴 LIVE</span> ${fmtClock(lm.elapsedMs)}</div>
+      <div class="match-row">
+        <span class="team-name-s">${lm.teamA}</span>
+        <span class="score-display">${lm.scoreA}</span>
+        <span class="vs">–</span>
+        <span class="score-display">${lm.scoreB}</span>
+        <span class="team-name-s right">${lm.teamB}</span>
+      </div>
+    </div>`).join('');
+  }
+  el.innerHTML=html;
 }
 function renderMatches(){
   const c=document.getElementById('matches-container');
@@ -13263,7 +13333,7 @@ function renderAll(){
   // always in sync with state.mode regardless of which code path changed it.
   document.documentElement.setAttribute('data-app-mode',isFriendlyMode()?'friendly':'competitive');
   renderModeBadge();
-  const steps=[renderSub,renderHome,renderActivity,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderReelsFeed,renderArchive,renderCareer,renderProfile,renderSettings];
+  const steps=[renderSub,renderHome,renderLiveNow,renderActivity,renderTable,renderMatches,renderScorers,renderLineups,renderDraft,renderResults,renderReelsFeed,renderArchive,renderCareer,renderProfile,renderSettings];
   steps.forEach(fn=>{
     try{fn();}catch(e){console.error('Render step failed:',fn.name,e);}
   });
@@ -13300,7 +13370,7 @@ function updatePendingApprovalUI(){
 // 'knockout' is kept as an alias for 'matches' -- the Knockout tab was merged into Matches, but
 // a few other places (cue cards, the Home screen's shortcut cards) may still reference the old
 // tab name by habit, and this keeps the tab pill label sensible if so instead of showing "knockout".
-const TAB_LABELS={home:'🏠 Home',activity:'🔔 Activity',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',reels:'📰 Match Feed',search:'🔍 Search',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
+const TAB_LABELS={home:'🏠 Home',livenow:'🔴 Live',activity:'🔔 Activity',table:'📊 Table',matches:'⚽ Matches',knockout:'⚽ Matches',scorers:'🥅 Scorers',lineups:'🎽 Lineup',draft:'🎡 Draft',allresults:'📜 History',reels:'📰 Match Feed',search:'🔍 Search',archive:'🗂 Archive',career:'🏆 Career',profile:'👤 Profile',help:'ℹ️ Help',settings:'⚙ Settings'};
 /* ---------- ANDROID HARDWARE/GESTURE BACK BUTTON ----------
  * Capacitor's default behavior for a WebView with no browser navigation history is to just
  * exit the app on back -- since this whole app is a single page with tabs swapped via JS
