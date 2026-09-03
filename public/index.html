@@ -3660,6 +3660,43 @@ function ratingBadge(val){
   return`<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;font-weight:700;background:${ratingColor(v)};color:${ratingTextColor(v)}">${v.toFixed(1)}${v>=9?' ⭐':''}</span>`;
 }
 
+// PHASE 4 (Multi-Sport Support) -- FOUNDATION ONLY, not wired into the app yet. The roadmap's own
+// Phase 4 item explicitly calls for piloting with 1-2 additional sports before building a fully
+// generic engine, rather than attempting one in a single pass -- POSITIONS/stat fields/PDF
+// templates/draft balancing/match-length defaults are all hardcoded to football throughout a very
+// large, live, single-file app with real users depending on it working correctly right now.
+// Rewriting all of that in one sitting is a genuinely separate, much bigger effort than everything
+// else in this pass combined, and rushing it risks breaking the football experience people
+// actually use today for a second sport nobody asked for yet.
+//
+// SPORT_CONFIGS below is the concrete shape a real multi-sport system would read from -- football
+// mirrors today's hardcoded values exactly (so extracting it changes nothing observable), and
+// basketball is included as a second worked example proving the shape generalizes, not as a
+// feature. Nothing in the app reads from this yet: POSITIONS below is untouched and still what
+// every existing call site uses. See the "Multi-Sport Support (Phase 4)" section of the
+// hand-off notes for the actual wiring plan (which functions need to become sport-aware, in what
+// order, and why football's position/rating/PDF logic has to be verified byte-identical at each
+// step before touching anything else).
+const SPORT_CONFIGS={
+  football:{
+    label:'Football',
+    positions:['GK','DEF','MID','FWD'],
+    // Maps to today's CONTRIB_STAT_KEYS/CARD_STAT_KEYS (see the defensive-stats/discipline
+    // tracking section) -- duplicated here as plain data rather than referencing those consts
+    // directly, since a real wiring pass would likely need this to be the single source of truth
+    // THEY derive from, not the other way around.
+    statFields:[['tackles','🛡️','Tackle'],['clearances','🧱','Clearance/Block'],['saves','🧤','Save'],['keyPasses','🔑','Key Pass'],['errors','❌','Error']],
+    cardFields:[['yellowCards','🟨','Yellow Card',2],['redCards','🟥','Red Card',1]],
+    defaultMatchMinutes:90
+  },
+  basketball:{
+    label:'Basketball',
+    positions:['PG','SG','SF','PF','C'],
+    statFields:[['rebounds','🏀','Rebound'],['steals','🖐️','Steal'],['blocks','🚫','Block'],['turnovers','❌','Turnover']],
+    cardFields:[['personalFouls','🟨','Personal Foul',5],['technicalFouls','🟥','Technical Foul',2]],
+    defaultMatchMinutes:40
+  }
+};
 /* ---------- PLAYER POSITIONS (persistent player database) ---------- */
 // A player can be eligible for more than one position (e.g. a DEF who also covers MID).
 // state.playerDB entries store positions:[...] with the first entry acting as the primary/
