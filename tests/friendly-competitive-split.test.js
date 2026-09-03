@@ -227,6 +227,101 @@ test('playerDisciplineTotals sums yellow/red cards across every played match thi
   assert.strictEqual(r.keithSuspendedFriendly, false, 'suspension tracking is competitive-mode only -- friendly mode must always read false');
 });
 
+test('bumpContribAndRender patches the existing tally <span> directly and skips the full renderMatches()/renderKnockout() re-render when the panel is already open', () => {
+  const { window } = freshWindow({ extraHtml: `<div id="host">
+    <span id="${'tally-'+encodeURIComponent('league|0|Keith|saves')}">🧤0</span>
+  </div>` });
+  const r = runInOneEval(window, `
+    state = { results: [{ played: false, g: [0,0], scorers: [], assists: [] }], fixtures: [[0,1]], teamNames: ['Red FC','Blue FC'], numTeams: 2 };
+    let fullRenders = 0;
+    renderMatches = function(){ fullRenders++; };
+    renderKnockout = function(){ fullRenders++; };
+    bumpContribAndRender('league', '0', 'Keith', 'saves', 1);
+    window.__results.spanText = document.getElementById('${'tally-'+encodeURIComponent('league|0|Keith|saves')}').textContent;
+    window.__results.fullRenders = fullRenders;
+  `);
+  assert.strictEqual(r.spanText, '🧤1', 'the span should be patched to the new value with its icon, in place');
+  assert.strictEqual(r.fullRenders, 0, 'a targeted DOM update should mean no full-tab re-render was triggered');
+});
+
+test('bumpContribAndRender falls back to a full renderMatches()/renderKnockout() call when the target span is not in the DOM (e.g. panel not open)', () => {
+  const { window } = freshWindow();
+  const r = runInOneEval(window, `
+    state = { results: [{ played: false, g: [0,0], scorers: [], assists: [] }], fixtures: [[0,1]], teamNames: ['Red FC','Blue FC'], numTeams: 2 };
+    let fullRenders = 0;
+    renderMatches = function(){ fullRenders++; };
+    // The test harness auto-stubs any missing getElementById id with a fresh empty <div> (so
+    // hundreds of unrelated ids the app touches don't need declaring), which would defeat this
+    // specific test -- it needs a genuine "not found" (null) to exercise the fallback branch, so
+    // it swaps in the real, un-stubbed lookup just for this one call.
+    const stubbed = document.getElementById;
+    document.getElementById = function(id){ return null; };
+    bumpContribAndRender('league', '0', 'Keith', 'saves', 1);
+    document.getElementById = stubbed;
+    window.__results.fullRenders = fullRenders;
+    window.__results.contrib = state.results[0].contributions['Keith'].saves;
+  `);
+  assert.strictEqual(r.contrib, 1, 'the underlying data must still update correctly even on the fallback path');
+  assert.strictEqual(r.fullRenders, 1, 'with no matching span present, it must fall back to a full render rather than silently doing nothing');
+});
+
+test('bumpCardAndRender patches its own tally span in place and leaves an un-suspended tag empty while still under the per-match cap, without a full re-render', () => {
+  const tallyId = 'tally-'+encodeURIComponent('league|0|Keith|yellowCards');
+  const suspId = 'susp-'+encodeURIComponent('Keith|0');
+  const { window } = freshWindow({ extraHtml: `<div id="host">
+    <span id="${tallyId}">🟨1</span>
+    <span id="${suspId}" data-susp-name="Keith" data-susp-team="0"></span>
+  </div>` });
+  const r = runInOneEval(window, `
+    state = { mode: 'competitive', results: [{ played: true, g:[0,0], scorers:[], assists:[], contributions: { Keith: { yellowCards: 1 } } }], fixtures: [[0,1]], teamNames: ['Red FC','Blue FC'], numTeams: 2 };
+    let fullRenders = 0;
+    renderMatches = function(){ fullRenders++; };
+    renderKnockout = function(){ fullRenders++; };
+    bumpCardAndRender('league', '0', 'Keith', 'yellowCards', 1);
+    window.__results.tallyText = document.getElementById('${tallyId}').textContent;
+    window.__results.suspHtmlAfterSecond = document.getElementById('${suspId}').innerHTML;
+    bumpCardAndRender('league', '0', 'Keith', 'yellowCards', 1);
+    window.__results.tallyTextAfterCap = document.getElementById('${tallyId}').textContent;
+    window.__results.suspHtmlAfterThird = document.getElementById('${suspId}').innerHTML;
+    window.__results.fullRenders = fullRenders;
+  `);
+  assert.strictEqual(r.tallyText, '🟨2', 'second yellow tap patches the tally span to 2');
+  assert.strictEqual(r.suspHtmlAfterSecond, '', 'not suspended yet at 2 accumulated yellows -- tag should stay empty');
+  assert.strictEqual(r.tallyTextAfterCap, '🟨2', 'yellowCards is capped at 2 per match, so a 3rd tap this match should not push the on-screen tally past 2');
+  assert.strictEqual(r.suspHtmlAfterThird, '', 'with only one match in the tournament, the per-match cap of 2 means the cross-match total can never reach 3 -- the tag correctly stays empty, and the targeted patch still ran (no full render) even though nothing visibly changed');
+  assert.strictEqual(r.fullRenders, 0, 'both the tally and the suspension tag should update via targeted DOM patch, no full re-render');
+});
+
+test('bumpCardAndRender flips a genuinely fresh SUSPENDED tag on when a yellow card in THIS match pushes the cross-match total to 3+, using a real multi-match fixture', () => {
+  const tallyId = 'tally-'+encodeURIComponent('league|1|Keith|yellowCards');
+  const suspId = 'susp-'+encodeURIComponent('Keith|0');
+  const { window } = freshWindow({ extraHtml: `<div id="host">
+    <span id="${tallyId}">🟨1</span>
+    <span id="${suspId}" data-susp-name="Keith" data-susp-team="0"></span>
+  </div>` });
+  const r = runInOneEval(window, `
+    state = {
+      mode: 'competitive',
+      results: [
+        { played: true, g:[1,0], scorers:[], assists:[], contributions: { Keith: { yellowCards: 2, redCards: 0 } } },
+        { played: true, g:[0,0], scorers:[], assists:[], contributions: { Keith: { yellowCards: 1 } } }
+      ],
+      fixtures: [[0,1],[0,1]], teamNames: ['Red FC','Blue FC'], numTeams: 2
+    };
+    let fullRenders = 0;
+    renderMatches = function(){ fullRenders++; };
+    window.__results.suspBefore = document.getElementById('${suspId}').innerHTML;
+    bumpCardAndRender('league', '1', 'Keith', 'yellowCards', 1);
+    window.__results.tallyAfter = document.getElementById('${tallyId}').textContent;
+    window.__results.suspAfter = document.getElementById('${suspId}').innerHTML;
+    window.__results.fullRenders = fullRenders;
+  `);
+  assert.strictEqual(r.suspBefore, '', 'only 2 accumulated yellows before this tap -- not suspended yet');
+  assert.strictEqual(r.tallyAfter, '🟨2', 'this match\'s own tally goes from 1 to 2 (still under the per-match cap)');
+  assert.ok(/SUSPENDED/.test(r.suspAfter), 'cross-match total is now 2+2=4 (>=3), so the tag must flip on via the targeted patch, not require a full re-render');
+  assert.strictEqual(r.fullRenders, 0);
+});
+
 test('renderModeBadge shows the active mode in words, not just color', () => {
   const { window } = freshWindow({ extraHtml: '<span id="app-mode-badge"></span>' });
   const r = runInOneEval(window, `

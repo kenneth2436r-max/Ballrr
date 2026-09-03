@@ -15,15 +15,30 @@ const path = require('path');
 // Pulls the app's main inline <script>...</script> block out of the built HTML. There are a
 // few tiny inline scripts (theme pre-paint, etc.) before it; the main one is identified as the
 // largest script block, which is robust to those small ones being added/removed/reordered.
+//
+// Set BALLRR_TEST_DIST=1 to instead get the MINIFIED production build (same extraction, run
+// through esbuild the same way build.js does) -- used by tests/build-output.test.js as a smoke
+// test that minification didn't silently change behavior. Done in-memory rather than by shelling
+// out to build.js and reading dist/ back, so this test has no filesystem side effects (some
+// sandboxed/managed filesystems -- this repo's own Cowork-mounted workspace folder included --
+// refuse to overwrite files once written, which a real dist/ directory would hit on a second
+// build). Every other test file runs unset, against the readable source in public/index.html,
+// same as always.
+function extractLargestBlock(html, re){
+  const blocks = [...html.matchAll(re)].map(m => m[1]);
+  blocks.sort((a, b) => b.length - a.length);
+  if(!blocks.length || blocks[0].length < 10000){
+    throw new Error('Could not find the main app block in public/index.html -- did the file structure change?');
+  }
+  return blocks[0];
+}
 function extractAppScript(){
   const htmlPath = path.join(__dirname, '..', '..', 'public', 'index.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
-  const blocks = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(m => m[1]);
-  blocks.sort((a, b) => b.length - a.length);
-  if(!blocks.length || blocks[0].length < 10000){
-    throw new Error('Could not find the main app <script> block in public/index.html -- did the file structure change?');
-  }
-  return blocks[0];
+  const src = extractLargestBlock(html, /<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g);
+  if(!process.env.BALLRR_TEST_DIST) return src;
+  const esbuild = require('esbuild');
+  return esbuild.transformSync(src, { loader: 'js', minify: true, target: 'es2019' }).code;
 }
 
 const APP_SRC = extractAppScript();

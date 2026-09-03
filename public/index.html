@@ -1384,6 +1384,24 @@ function setFollowedHost(obj){
 }
 followedHost=getFollowedHost();
 
+// PERFORMANCE: saveState() is called on every single edit anywhere in the app, including every
+// tap of a live-scoring tally button (goals/assists/defensive stats/cards) -- during a fast-paced
+// match a host can easily fire off a dozen taps in a few seconds. JSON.stringify(state) on a
+// tournament with real history behind it is not free, and running it synchronously on every tap
+// was extra main-thread work stacked right on top of the render each tap already triggers. It's
+// now debounced the same way the cloud save below already was, trailing by localSaveDelayMs --
+// short enough that a save always lands well before someone navigates away mid-burst, but long
+// enough to collapse a rapid run of taps into one write instead of one-per-tap. flushLocalSaveNow()
+// bypasses the debounce for the one case where losing the last pending write would actually hurt:
+// backgrounding/closing the app (see the visibilitychange/pagehide listeners below).
+let localSaveTimer=null;
+const localSaveDelayMs=250;
+function flushLocalSaveNow(){
+  clearTimeout(localSaveTimer);
+  localSaveTimer=null;
+  if(getActiveSharedCode())return;
+  try{localStorage.setItem(SK,JSON.stringify(state));}catch(e){}
+}
 function saveState(){
   // Only cache to the local key when NOT inside someone else's shared tournament -- this used
   // to write unconditionally, which meant a follower's (or member's) local "my own tournament"
@@ -1393,7 +1411,8 @@ function saveState(){
   // private view -- loadPrivateTournament() would fall back to this poisoned local copy
   // whenever the user had no cloud-saved private tournament of their own yet.
   if(!getActiveSharedCode()){
-    try{localStorage.setItem(SK,JSON.stringify(state));}catch(e){}
+    clearTimeout(localSaveTimer);
+    localSaveTimer=setTimeout(flushLocalSaveNow,localSaveDelayMs);
   }
   if(!currentUser||applyingRemoteUpdate)return;
   const code=getActiveSharedCode();
@@ -2196,7 +2215,16 @@ function ensurePendingApprovalPolling(){
 if(typeof document!=='undefined'&&document.addEventListener){
   document.addEventListener('visibilitychange',()=>{
     if(document.visibilityState==='visible')refreshSharedMetaNow();
+    // Backgrounding is exactly when a debounced local save (see flushLocalSaveNow's comment)
+    // could otherwise be lost -- a host switching apps mid-match, or the OS suspending/killing a
+    // backgrounded WebView, doesn't wait around for a pending setTimeout to fire.
+    else flushLocalSaveNow();
   });
+}
+if(typeof window!=='undefined'&&window.addEventListener){
+  // pagehide is the reliable one on iOS Safari/WebViews, where visibilitychange can be skipped
+  // entirely on some navigation-away paths -- belt and suspenders with the listener above.
+  window.addEventListener('pagehide',flushLocalSaveNow);
 }
 
 let sharedPayloadFirstLoad=true;
@@ -5900,16 +5928,43 @@ function toggleDefStatsPanel(kind,ref){
   defStatsOpenFor=(defStatsOpenFor===key)?null:key;
   if(kind==='league')renderMatches();else renderKnockout();
 }
+// PERFORMANCE: bumpContribAndRender/bumpCardAndRender below are the single most-tapped action
+// during a live match (every tackle, save, card -- easily dozens of taps per match), and used to
+// call renderMatches()/renderKnockout() on EVERY tap, which rebuilds that whole tab's innerHTML
+// from scratch just to update one number. On a big tournament with many matches/players that's a
+// full reflow/repaint of a large subtree for a one-character change, which is exactly the kind of
+// thing that makes the app feel laggy the more you use it live. tallyElId()/updateTallySpan()
+// below let both functions patch just the one <span> that changed directly, skipping the render
+// entirely on the (overwhelmingly common) case where the panel is already open and the target
+// span exists -- full re-render is kept ONLY as a defensive fallback for any caller shape this
+// doesn't anticipate. encodeURIComponent keeps the id a safe plain ASCII token (no HTML-escaping
+// or CSS-selector-escaping needed) so getElementById is an exact, cheap, O(1) lookup.
+function tallyElId(kind,ref,name,statKey){
+  return'tally-'+encodeURIComponent(kind+'|'+ref+'|'+name+'|'+statKey);
+}
+function suspendedTagElId(name,teamId){
+  return'susp-'+encodeURIComponent(name+'|'+teamId);
+}
+function updateTallySpan(kind,ref,name,statKey,icon,newVal){
+  const span=document.getElementById(tallyElId(kind,ref,name,statKey));
+  if(!span)return false;
+  span.textContent=icon+newVal;
+  return true;
+}
 const DEF_STAT_TALLY_FIELDS=[['tackles','🛡️','Tackle'],['clearances','🧱','Clearance/Block'],['saves','🧤','Save'],['keyPasses','🔑','Key Pass'],['errors','❌','Error']];
 function bumpContribAndRender(kind,ref,name,statKey,delta){
   const matchObj=kind==='league'?state.results[parseInt(ref,10)]:getMatchObjByPath(ref);
   if(!matchObj)return;
   if(!matchObj.contributions)matchObj.contributions={};
   if(!matchObj.contributions[name])matchObj.contributions[name]={};
-  matchObj.contributions[name][statKey]=Math.max(0,(matchObj.contributions[name][statKey]||0)+delta);
+  const newVal=Math.max(0,(matchObj.contributions[name][statKey]||0)+delta);
+  matchObj.contributions[name][statKey]=newVal;
   saveState();
   haptic('tap');
-  if(kind==='league')renderMatches();else renderKnockout();
+  const icon=(DEF_STAT_TALLY_FIELDS.find(([sk])=>sk===statKey)||[])[1]||'';
+  if(!updateTallySpan(kind,ref,name,statKey,icon,newVal)){
+    if(kind==='league')renderMatches();else renderKnockout();
+  }
 }
 // Yellow/red cards, competitive mode only (per user request -- a friendly 5-a-side kickabout has
 // no disciplinary record to track). Capped per match: 2 yellows, 1 red -- a second yellow is a
@@ -5923,10 +5978,26 @@ function bumpCardAndRender(kind,ref,name,cardKey,delta){
   if(!matchObj.contributions[name])matchObj.contributions[name]={};
   const cap=cardKey==='yellowCards'?2:1;
   const c=matchObj.contributions[name];
-  c[cardKey]=Math.max(0,Math.min(cap,(c[cardKey]||0)+delta));
+  const newVal=Math.max(0,Math.min(cap,(c[cardKey]||0)+delta));
+  c[cardKey]=newVal;
   saveState();
   haptic('tap');
-  if(kind==='league')renderMatches();else renderKnockout();
+  const icon=(DISCIPLINE_TALLY_FIELDS.find(([sk])=>sk===cardKey)||[])[1]||'';
+  let handled=updateTallySpan(kind,ref,name,cardKey,icon,newVal);
+  // A card change can flip suspension status -- refresh just that tag too, same targeted-update
+  // idea, rather than letting a stale "not suspended" tag sit there until the next full render.
+  if(handled){
+    // teamId isn't directly available here, so match it against every suspended-tag element for
+    // this player (there's at most one per open panel -- a player only appears once per side).
+    document.querySelectorAll('[data-susp-name]').forEach(el=>{
+      if(el.getAttribute('data-susp-name')!==name)return;
+      const teamId=el.getAttribute('data-susp-team');
+      const suspended=isPlayerSuspended(name,teamId===''?null:parseInt(teamId,10));
+      el.innerHTML=suspended?'<span style="font-size:10px;font-weight:700;color:#a32d2d;margin-left:4px">🚫 SUSPENDED</span>':'';
+    });
+  }else{
+    if(kind==='league')renderMatches();else renderKnockout();
+  }
 }
 // Running discipline totals for a player across every played match THIS tournament (across both
 // teams if teamId is omitted, or scoped to one team) -- the same allPlayedMatchesWithTeams() walk
@@ -5967,17 +6038,17 @@ function defStatsPanelHtml(kind,ref,matchObj,teamIds){
       const stats=DEF_STAT_TALLY_FIELDS.map(([sk,icon,label])=>`
         <span title="${label}" style="display:inline-flex;align-items:center;gap:2px;background:#f8f7f2;border:1px solid #ddd;border-radius:6px;padding:2px 3px;margin:2px">
           <button onclick="bumpContribAndRender('${kind}','${ref}','${safeName}','${sk}',-1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#888">−</button>
-          <span style="font-size:11px;min-width:24px;text-align:center;display:inline-block">${icon}${c[sk]||0}</span>
+          <span id="${tallyElId(kind,ref,name,sk)}" style="font-size:11px;min-width:24px;text-align:center;display:inline-block">${icon}${c[sk]||0}</span>
           <button onclick="bumpContribAndRender('${kind}','${ref}','${safeName}','${sk}',1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#2a7d1a">+</button>
         </span>`).join('');
       const cards=showCards?DISCIPLINE_TALLY_FIELDS.map(([sk,icon,label])=>`
         <span title="${label}" style="display:inline-flex;align-items:center;gap:2px;background:#f8f7f2;border:1px solid #ddd;border-radius:6px;padding:2px 3px;margin:2px">
           <button onclick="bumpCardAndRender('${kind}','${ref}','${safeName}','${sk}',-1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#888">−</button>
-          <span style="font-size:11px;min-width:24px;text-align:center;display:inline-block">${icon}${c[sk]||0}</span>
+          <span id="${tallyElId(kind,ref,name,sk)}" style="font-size:11px;min-width:24px;text-align:center;display:inline-block">${icon}${c[sk]||0}</span>
           <button onclick="bumpCardAndRender('${kind}','${ref}','${safeName}','${sk}',1)" style="border:none;background:none;font-weight:700;cursor:pointer;padding:0 4px;color:#2a7d1a">+</button>
         </span>`).join(''):'';
       const suspendedTag=showCards&&isPlayerSuspended(name,teamId)?'<span style="font-size:10px;font-weight:700;color:#a32d2d;margin-left:4px">🚫 SUSPENDED</span>':'';
-      return`<div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;padding:5px 0;border-bottom:1px solid #eee"><span style="font-size:12px;font-weight:600;min-width:84px">${esc(jerseyLabel(name,teamId))}${suspendedTag}</span>${stats}${cards}</div>`;
+      return`<div style="display:flex;align-items:center;flex-wrap:wrap;gap:2px;padding:5px 0;border-bottom:1px solid #eee"><span style="font-size:12px;font-weight:600;min-width:84px">${esc(jerseyLabel(name,teamId))}<span id="${suspendedTagElId(name,teamId)}" data-susp-name="${esc(name)}" data-susp-team="${teamId==null?'':teamId}" style="display:inline">${suspendedTag}</span></span>${stats}${cards}</div>`;
     }).join('');
     return`<div style="margin-bottom:8px"><div style="font-size:11px;color:#888;margin-bottom:2px">${esc(state.teamNames[teamId])}</div>${rows}</div>`;
   }).join('');
@@ -10752,6 +10823,26 @@ function showMyTeamRivalries(){
 // See computeCareerArchetypes()'s topBy() comment -- populated fresh every renderCareer() call,
 // read by showArchetypeRanking() below.
 let careerArchetypesCache=[];
+// PERFORMANCE: Career/Archive lists are the two views most likely to grow genuinely large over a
+// device's lifetime (every player who's ever appeared in any saved tournament; every tournament
+// ever saved) -- unlike a single tournament's own matches, which are naturally capped by how many
+// games got played. Rendering hundreds of rows into one innerHTML write on every render is real,
+// avoidable work once a list gets long. Rather than a real virtualized/windowed scroll (a bigger
+// change, and these lists don't scroll fast enough for that to matter), a simple "show first N,
+// load more on tap" cap keeps the common case (a newer/casual user with a handful of entries)
+// rendering everything as before, while a heavy long-term user's list stays capped until they
+// actually ask to see more.
+const LIST_PAGE_SIZE=25;
+let careerVisibleCount=LIST_PAGE_SIZE;
+let archiveVisibleCount=LIST_PAGE_SIZE;
+function showMoreCareer(targetId){
+  careerVisibleCount+=LIST_PAGE_SIZE;
+  renderCareer(targetId);
+}
+function showMoreArchive(){
+  archiveVisibleCount+=LIST_PAGE_SIZE;
+  renderArchive();
+}
 // Shows exactly why a player holds an archetype badge -- the full ranked candidate list, not
 // just the single winner -- since these are ratio-based (per match), not raw-total-based, and
 // "why does X still have this badge when Y has more goals/assists overall" is a genuinely
@@ -10791,11 +10882,15 @@ function renderCareer(targetId){
       <div class="badge-chip" style="cursor:pointer" onclick="showArchetypeRanking(${i})"><span class="badge-icon">${a.icon}</span><div><div class="badge-label">${esc(a.label)}</div><div class="badge-detail">${esc(a.name)} · ${esc(a.detail)}</div></div></div>`).join('')+'</div>';
     html+='<div class="section-header">All-Time Leaderboard</div>';
   }
-  html+=list.map((p,i)=>`
+  const visible=list.slice(0,careerVisibleCount);
+  html+=visible.map((p,i)=>`
     <div class="scorer-item">
       <div><span class="rank">${medals[i]||(i+1)+'.'}</span><strong class="player-name-link" onclick="showPlayerCard('${esc(p.name).replace(/'/g,"\\'")}')">${esc(p.name)}</strong> <span style="color:#888;font-size:12px">(${esc(p.team||'—')} · ${p.tournaments} tournament${p.tournaments===1?'':'s'} · ${p.matches} match${p.matches===1?'':'es'})</span></div>
       <span class="g-badge" style="background:#e0c4f7;color:#3a0a52">${p.goals}⚽ ${p.assists}🅰${p.cleanSheets?' '+p.cleanSheets+'🧤':''}</span>
     </div>`).join('');
+  if(list.length>visible.length){
+    html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="showMoreCareer('${targetId||'career-container'}')">Show more (${list.length-visible.length} more)</button>`;
+  }
   el.innerHTML=html;
 }
 
@@ -10831,7 +10926,11 @@ function renderArchive(){
   // signed out) can end up missing from a follower's profile -- this fixes all of them in one
   // batch instead of tapping "Followers: change visibility" on each entry individually.
   if(history.length&&currentUser)html+='<button class="theme-btn" style="width:100%;margin-bottom:10px" onclick="publishAllArchivedTournaments()">👥 Publish all to followers</button>';
-  html+=history.length?history.map(archiveEntryHtml).join(''):'<div class="empty-msg">No tournaments saved yet</div>';
+  const visibleHistory=history.slice(0,archiveVisibleCount);
+  html+=history.length?visibleHistory.map(archiveEntryHtml).join(''):'<div class="empty-msg">No tournaments saved yet</div>';
+  if(history.length>visibleHistory.length){
+    html+=`<button class="theme-btn" style="width:100%;margin-top:8px" onclick="showMoreArchive()">Show more (${history.length-visibleHistory.length} more)</button>`;
+  }
   c.innerHTML=html;
 }
 
