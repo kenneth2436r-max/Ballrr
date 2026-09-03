@@ -389,6 +389,16 @@ tbody td:nth-child(2){text-align:left;font-weight:500;font-size:13px}
 
 /* Match entry */
 .match-card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:14px;margin-bottom:10px}
+/* PHASE 2 -- distinct LIVE visual treatment (see renderMatches()'s isLive comment): a subtle red
+   accent border + soft glow, not just a color change buried in the timer digits, so a live match
+   stands out while scanning a long list. box-shadow (not a layout-affecting border-width change)
+   keeps this compositor-cheap. */
+.match-card-live{border-color:#c0392b;box-shadow:0 0 0 1px rgba(192,57,57,0.35),0 4px 16px rgba(192,57,57,0.15)}
+.live-badge{display:inline-block;background:#c0392b;color:#fff;font-size:10px;font-weight:800;letter-spacing:0.5px;padding:2px 7px;border-radius:20px;margin-right:4px;vertical-align:middle}
+/* PHASE 2 -- "next scheduled match surfaced prominently" (see nextUpMatchBannerHtml()) */
+.next-up-banner{display:flex;align-items:center;gap:8px;background:var(--btn-bg);color:var(--btn-text);border-radius:12px;padding:10px 14px;margin-bottom:12px;cursor:pointer;box-shadow:var(--btn-glow)}
+.next-up-label{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.5px;opacity:0.85}
+.next-up-teams{font-size:14px;font-weight:700}
 .match-label{font-size:12px;color:var(--text-muted);margin-bottom:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.3px}
 .match-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}
 .match-timer{background:var(--input-bg);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px;text-align:center}
@@ -4155,6 +4165,37 @@ function resultsCompactToggleHtml(){
     </label>
   </div>`;
 }
+// PHASE 2 -- "next scheduled match surfaced prominently": with a long fixture list, it wasn't
+// obvious at a glance which match a host should play/score next -- everything looked the same
+// until you scrolled down and read "✓ saved" on each one. nextUpMatchInfo() finds the first
+// not-yet-played league fixture in order; the banner links straight to its card. Skipped entirely
+// for a pure knockout tournament (no flat fixture list to walk) and skipped when that next match
+// is ALREADY live (its own LIVE badge on the card covers that case -- calling it "next" too would
+// be redundant/confusing).
+function nextUpMatchInfo(){
+  if(state.formatType==='knockout')return null;
+  if(!state.fixtures||!state.results)return null;
+  for(let mi=0;mi<state.fixtures.length;mi++){
+    const r=state.results[mi];
+    if(r&&!r.played)return{mi,m:state.fixtures[mi]};
+  }
+  return null;
+}
+function nextUpMatchBannerHtml(){
+  const info=nextUpMatchInfo();
+  if(!info)return'';
+  const{mi,m}=info;
+  const r=state.results[mi];
+  if(r.timer&&r.timer.running)return'';
+  return`<div class="next-up-banner" onclick="scrollToMatchCard(${mi})">
+    <span class="next-up-label">⏭ Next up</span>
+    <span class="next-up-teams">${teamLabel(m[0])} <span class="vs">vs</span> ${teamLabel(m[1])}</span>
+  </div>`;
+}
+function scrollToMatchCard(mi){
+  const el=document.getElementById('match-card-'+mi);
+  if(el&&el.scrollIntoView)el.scrollIntoView({behavior:'smooth',block:'start'});
+}
 function renderMatches(){
   const c=document.getElementById('matches-container');
   if(state.formatType==='knockout'){
@@ -4165,7 +4206,7 @@ function renderMatches(){
     return;
   }
   const compact=state.resultsCompact===true;
-  let html=renderPredictionLeaderboardHtml()+resultsCompactToggleHtml()+state.fixtures.map((m,mi)=>{
+  let html=nextUpMatchBannerHtml()+renderPredictionLeaderboardHtml()+resultsCompactToggleHtml()+state.fixtures.map((m,mi)=>{
     const r=state.results[mi];
     const na=state.teamNames[m[0]],nb=state.teamNames[m[1]];
     const liveScore=calcMatchScore(state.results,mi,state.fixtures);
@@ -4193,8 +4234,14 @@ function renderMatches(){
         <button class="rem-btn" onclick="removeAssist(${mi},${si})">×</button>
       </div>`).join('');
     const squadHtml=squadPickerHtml('league',mi,m,compact);
-    return`<div class="match-card">
-      <div class="match-label">Match ${mi+1}${legNote} &nbsp;·&nbsp; ${teamLabel(m[0])} vs ${teamLabel(m[1])} ${r.played?'<span style="font-size:11px;color:#2a7d1a">✓ saved</span>':''}</div>
+    // PHASE 2 -- "distinct LIVE visual treatment": before this, a match in progress looked
+    // identical to one that hadn't started -- the only signal was the timer digits turning green
+    // deep inside the card. isLive drives a card-level badge + accent border instead, so a host
+    // scanning a long Matches list can tell at a glance which one is actually being played right
+    // now (mirrors the timer's own r.timer.running flag, just surfaced at the card level too).
+    const isLive=!!(r.timer&&r.timer.running);
+    return`<div class="match-card${isLive?' match-card-live':''}" id="match-card-${mi}">
+      <div class="match-label">${isLive?'<span class="live-badge">🔴 LIVE</span> ':''}Match ${mi+1}${legNote} &nbsp;·&nbsp; ${teamLabel(m[0])} vs ${teamLabel(m[1])} ${r.played?'<span style="font-size:11px;color:#2a7d1a">✓ saved</span>':''}</div>
       ${isFriendlyMode()?rivalryHtml(mi):''}
       <div class="match-row">
         <span class="team-name-s">${teamLabel(m[0])}</span>
@@ -4211,9 +4258,11 @@ function renderMatches(){
       <div class="scorers-label">Goal scorers: <span style="color:#aaa">name · goals · team</span></div>
       <div id="scorers-${mi}">${scorerRows}</div>
       <button class="add-scorer" onclick="promptAddScorer(${mi})">+ Add scorer</button>
+      <button class="add-scorer" onclick="quickAddGoal(${mi})" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick goal</button>
       <div class="scorers-label" style="margin-top:10px">Assists: <span style="color:#aaa">name · assists · team</span></div>
       <div id="assists-${mi}">${assistRows}</div>
       <button class="add-scorer" onclick="promptAddAssist(${mi})">+ Add assist</button>
+      <button class="add-scorer" onclick="quickAddAssist(${mi})" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick assist</button>
       ${compact?'':`<button class="add-scorer" id="voice-btn-${mi}" onclick="startVoiceLog(${mi})" style="border-style:dashed">🎤 Voice log</button>`}
       ${squadHtml}
       ${defStatsPanelHtml('league',mi,r,m)}
@@ -9478,8 +9527,9 @@ function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
       <input type="number" min="1" max="20" value="${s.count||1}" onchange="updateKOAssist('${pathKey}',${si},'count',this.value,[${teamIds[0]},${teamIds[1]}])" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:13px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric" title="Assists">
       <button class="rem-btn" onclick="removeKOAssist('${pathKey}',${si})">×</button>
     </div>`).join('');
-  return`<div class="ko-card ${extraClass||''}" style="text-align:left">
-    <div class="ko-title">${label} ${matchObj.played?'<span style="color:#2a7d1a;text-transform:none;font-size:11px">· ✓ played</span>':''}</div>
+  const isLive=!!(matchObj.timer&&matchObj.timer.running);
+  return`<div class="ko-card ${extraClass||''}${isLive?' match-card-live':''}" style="text-align:left">
+    <div class="ko-title">${isLive?'<span class="live-badge">🔴 LIVE</span> ':''}${label} ${matchObj.played?'<span style="color:#2a7d1a;text-transform:none;font-size:11px">· ✓ played</span>':''}</div>
     <div class="match-row" style="margin-top:6px">
       <span class="team-name-s">${esc(na)}</span>
       <span class="score-display" id="ko-score-${safeId}-a">${liveScore[0]}</span>
@@ -9496,9 +9546,11 @@ function koMatchCardHtml(pathKey,matchObj,teamIds,label,extraClass){
     <div class="scorers-label">Goal scorers: <span style="color:#aaa">name · goals · team</span></div>
     <div>${scorerRows}</div>
     <button class="add-scorer" onclick="promptAddKOScorer('${pathKey}',[${teamIds[0]},${teamIds[1]}])">+ Add scorer</button>
+    <button class="add-scorer" onclick="quickAddKOGoal('${pathKey}',[${teamIds[0]},${teamIds[1]}])" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick goal</button>
     <div class="scorers-label" style="margin-top:10px">Assists: <span style="color:#aaa">name · assists · team</span></div>
     <div>${assistRows}</div>
     <button class="add-scorer" onclick="promptAddKOAssist('${pathKey}',[${teamIds[0]},${teamIds[1]}])">+ Add assist</button>
+    <button class="add-scorer" onclick="quickAddKOAssist('${pathKey}',[${teamIds[0]},${teamIds[1]}])" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick assist</button>
     ${compact?'':`<button class="add-scorer" id="ko-voice-btn-${safeId}" onclick="startKOVoiceLog('${pathKey}',[${teamIds[0]},${teamIds[1]}])" style="border-style:dashed">🎤 Voice log</button>`}
     ${squadPickerHtml('ko',pathKey,teamIds,compact)}
     ${defStatsPanelHtml('ko',pathKey,matchObj,teamIds)}
@@ -13476,6 +13528,89 @@ function promptAddKOScorer(pathKey,teamIds){
 }
 function promptAddKOAssist(pathKey,teamIds){
   openTeamPickPopup(state.teamNames[teamIds[0]],state.teamNames[teamIds[1]],idx=>addKOAssist(pathKey,idx===0?teamIds[0]:teamIds[1]));
+}
+// PHASE 2 (Match-Scoring UX) -- "consolidate scoring actions into fewer taps": logging a goal the
+// original way is Add scorer -> pick a team -> (row appears, still blank) -> tap its player select
+// -> pick a name -- 4 taps, 2 separate popups, before the goal actually counts (updateScorer only
+// fires the celebration/feed logging once a name lands, see its own comment). quickAddGoal() and
+// friends below chain the SAME team-pick popup straight into a player picker (built on the
+// existing custom-select-overlay, just fed an in-memory <select> instead of one already in the
+// DOM) so the two picks happen back to back with no intermediate "now find the blank row" step --
+// 2 taps total, same end state, same addScorer/updateScorer (or KO equivalents) calls a manual
+// edit would make, so celebration/feed/rating logic is identical either way. Purely additive: the
+// original "+ Add scorer"/"+ Add assist" buttons and inline row editing are untouched, still there
+// for anyone who wants to fix up a name or add a second scorer to an existing row afterward.
+function quickPickerRoster(kind,matchRef,teamId){
+  const matchObj=kind==='league'?state.results[parseInt(matchRef,10)]:getMatchObjByPath(matchRef);
+  const squad=matchObj?getMatchSquad(matchObj,teamId):[];
+  const roster=squad.length?squad:rosterForTeam(teamId);
+  return sortNamesByJersey(roster,teamId);
+}
+function openQuickPlayerPicker(kind,matchRef,teamId,label,onPick){
+  const roster=quickPickerRoster(kind,matchRef,teamId);
+  if(!roster.length){onPick('');return;} // nobody marked as played yet -- fall back to a blank row, same as the original flow
+  const sel=document.createElement('select');
+  sel.setAttribute('aria-label',label);
+  roster.forEach(name=>{
+    const opt=document.createElement('option');
+    opt.value=name;opt.textContent=jerseyLabel(name,teamId);
+    sel.appendChild(opt);
+  });
+  const custom=document.createElement('option');
+  custom.value='__custom__';custom.textContent='✎ Custom name…';
+  sel.appendChild(custom);
+  sel.addEventListener('change',()=>{
+    if(sel.value==='__custom__'){
+      showThemedPrompt('Player name',null,name=>onPick((name||'').trim()));
+    }else{
+      onPick(sel.value);
+    }
+  });
+  openCustomSelectPanel(sel);
+}
+function quickAddGoal(mi){
+  const m=state.fixtures[mi];
+  openTeamPickPopup(state.teamNames[m[0]],state.teamNames[m[1]],teamIdx=>{
+    const teamId=teamIdx===0?m[0]:m[1];
+    openQuickPlayerPicker('league',String(mi),teamId,'Who scored?',name=>{
+      addScorer(mi,teamId);
+      const si=state.results[mi].scorers.length-1;
+      if(name)updateScorer(mi,si,'name',name);
+    });
+  });
+}
+function quickAddAssist(mi){
+  const m=state.fixtures[mi];
+  openTeamPickPopup(state.teamNames[m[0]],state.teamNames[m[1]],teamIdx=>{
+    const teamId=teamIdx===0?m[0]:m[1];
+    openQuickPlayerPicker('league',String(mi),teamId,'Who assisted?',name=>{
+      addAssist(mi,teamId);
+      const si=state.results[mi].assists.length-1;
+      if(name)updateAssist(mi,si,'name',name);
+    });
+  });
+}
+function quickAddKOGoal(pathKey,teamIds){
+  openTeamPickPopup(state.teamNames[teamIds[0]],state.teamNames[teamIds[1]],teamIdx=>{
+    const teamId=teamIdx===0?teamIds[0]:teamIds[1];
+    openQuickPlayerPicker('ko',pathKey,teamId,'Who scored?',name=>{
+      addKOScorer(pathKey,teamId);
+      const m=getMatchObjByPath(pathKey);
+      const si=m.scorers.length-1;
+      if(name)updateKOScorer(pathKey,si,'name',name,teamIds);
+    });
+  });
+}
+function quickAddKOAssist(pathKey,teamIds){
+  openTeamPickPopup(state.teamNames[teamIds[0]],state.teamNames[teamIds[1]],teamIdx=>{
+    const teamId=teamIdx===0?teamIds[0]:teamIds[1];
+    openQuickPlayerPicker('ko',pathKey,teamId,'Who assisted?',name=>{
+      addKOAssist(pathKey,teamId);
+      const m=getMatchObjByPath(pathKey);
+      const si=m.assists.length-1;
+      if(name)updateKOAssist(pathKey,si,'name',name,teamIds);
+    });
+  });
 }
 function interceptNativeSelect(e){
   const sel=e.target&&e.target.closest&&e.target.closest('select');
