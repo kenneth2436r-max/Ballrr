@@ -1082,6 +1082,20 @@ select option{background:var(--input-bg);color:var(--text)}
   <div class="player-card" id="player-card-content"></div>
 </div>
 
+<!-- MATCH CENTER: the "click a match to see details/log" focused view -- see renderMatches()'s
+     compact-card comment and matchDetailBodyHtml()'s own comment for the reasoning (keeping the
+     scrolling Matches list to score + timer + feed only, with scorer/assist/squad/defensive-stats
+     entry moved in here, opened per match instead of all stacked inline). -->
+<div id="match-center-overlay" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeMatchCenter()">
+  <div class="wizard-card" style="max-width:420px;text-align:left">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px">
+      <div class="recap-title" id="match-center-title" style="margin-bottom:0"></div>
+      <button class="rem-btn" onclick="closeMatchCenter()" style="font-size:22px" aria-label="Close">×</button>
+    </div>
+    <div id="match-center-body"></div>
+  </div>
+</div>
+
 <div id="trophy-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeTrophyModal()">
   <div class="trophy-card" id="trophy-card-content"></div>
 </div>
@@ -4303,6 +4317,95 @@ function renderLiveNow(){
   }
   el.innerHTML=html;
 }
+// MATCH CENTER -- "click on a match and see the details or log" (user request, comparing Ballrr's
+// old single-scroll Matches list unfavorably to a competitor's cleaner one): every league match
+// used to render its ENTIRE editing surface inline -- scorer rows, assist rows, the squad picker,
+// defensive stats, voice log, save/share/POTM buttons -- all stacked in the scrolling list at
+// once, for every match, whether or not it's the one being worked on. That's what "clogged"
+// meant. The compact card in the list now keeps only the glanceable stuff (score, LIVE badge,
+// timer, predictions, feed) plus a "View match & log" button; everything else moves into this
+// modal, opened for one match at a time. matchDetailBodyHtml(mi) is the exact same markup that
+// used to be inline (scorerRows/assistRows/squadHtml and friends), just relocated -- no scoring
+// logic changed, only where its UI lives.
+let matchCenterOpen=null; // {kind:'league', ref:'<mi>'} | null -- 'ko' kind reserved for later, knockout cards are untouched for now
+function openMatchCenter(kind,ref){
+  matchCenterOpen={kind,ref:String(ref)};
+  renderMatchCenterModal();
+  // renderMatchCenterModal() may have bailed out and called closeMatchCenter() itself (e.g. the
+  // match no longer exists) -- only show the overlay if it's still actually open after that.
+  if(!matchCenterOpen)return;
+  const el=document.getElementById('match-center-overlay');
+  if(el)el.style.display='flex';
+  haptic('tap');
+}
+function closeMatchCenter(){
+  matchCenterOpen=null;
+  const el=document.getElementById('match-center-overlay');
+  if(el)el.style.display='none';
+}
+// Regenerates the modal's content from the CURRENT state -- called both when it's first opened
+// and again at the end of every renderMatches() pass (matching how the old inline version used to
+// pick up every edit automatically), so an edit made inside the modal (add a scorer, tap a
+// defensive-stat tally) is reflected immediately without needing to close and reopen it.
+function renderMatchCenterModal(){
+  const body=document.getElementById('match-center-body');
+  const titleEl=document.getElementById('match-center-title');
+  if(!body||!matchCenterOpen)return;
+  if(matchCenterOpen.kind==='league'){
+    const mi=parseInt(matchCenterOpen.ref,10);
+    const m=state.fixtures&&state.fixtures[mi];
+    if(!m){closeMatchCenter();return;} // match no longer exists (fixtures changed under it) -- bail out rather than show stale/broken content
+    if(titleEl)titleEl.textContent='Match '+(mi+1)+' · '+state.teamNames[m[0]]+' vs '+state.teamNames[m[1]];
+    body.innerHTML=matchDetailBodyHtml(mi);
+  }
+}
+function matchDetailBodyHtml(mi){
+  const r=state.results[mi];
+  const m=state.fixtures[mi];
+  const na=state.teamNames[m[0]],nb=state.teamNames[m[1]];
+  const compact=state.resultsCompact===true;
+  const scorerRows=r.scorers.map((s,si)=>`
+    <div class="scorer-row">
+      <select onchange="updateScorer(${mi},${si},'team',this.value)">
+        <option value="${m[0]}" ${s.team===m[0]?'selected':''}>${esc(na)}</option>
+        <option value="${m[1]}" ${s.team===m[1]?'selected':''}>${esc(nb)}</option>
+      </select>
+      ${nameFieldHtml(s.team,s.name,'scorer',{mi:mi,si:si})}
+      <input type="number" min="1" max="20" value="${s.goals||1}" onchange="updateScorer(${mi},${si},'goals',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:13px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric" title="Goals scored">
+      ${compact?'':`<label class="pen-check" title="Scored from the penalty spot"><input type="checkbox" ${s.pen?'checked':''} onchange="updateScorer(${mi},${si},'pen',this.checked)"> Pen</label>`}
+      <button class="rem-btn" onclick="removeScorer(${mi},${si})">×</button>
+    </div>`).join('');
+  const assistRows=(r.assists||[]).map((s,si)=>`
+    <div class="scorer-row">
+      <select onchange="updateAssist(${mi},${si},'team',this.value)">
+        <option value="${m[0]}" ${s.team===m[0]?'selected':''}>${esc(na)}</option>
+        <option value="${m[1]}" ${s.team===m[1]?'selected':''}>${esc(nb)}</option>
+      </select>
+      ${nameFieldHtml(s.team,s.name,'assist',{mi:mi,si:si})}
+      <input type="number" min="1" max="20" value="${s.count||1}" onchange="updateAssist(${mi},${si},'count',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:13px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric" title="Assists">
+      <button class="rem-btn" onclick="removeAssist(${mi},${si})">×</button>
+    </div>`).join('');
+  const squadHtml=squadPickerHtml('league',mi,m,compact);
+  return`<div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:10px">Score is the total of goal scorers added below. No scorers yet = 0–0.</div>
+    <div class="scorers-label">Goal scorers: <span style="color:#aaa">name · goals · team</span></div>
+    <div id="scorers-${mi}">${scorerRows}</div>
+    <button class="add-scorer" onclick="promptAddScorer(${mi})">+ Add scorer</button>
+    <button class="add-scorer" onclick="quickAddGoal(${mi})" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick goal</button>
+    <div class="scorers-label" style="margin-top:10px">Assists: <span style="color:#aaa">name · assists · team</span></div>
+    <div id="assists-${mi}">${assistRows}</div>
+    <button class="add-scorer" onclick="promptAddAssist(${mi})">+ Add assist</button>
+    <button class="add-scorer" onclick="quickAddAssist(${mi})" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick assist</button>
+    ${compact?'':`<button class="add-scorer" id="voice-btn-${mi}" onclick="startVoiceLog(${mi})" style="border-style:dashed">🎤 Voice log</button>`}
+    ${squadHtml}
+    ${defStatsPanelHtml('league',mi,r,m)}
+    <button class="save-btn" onclick="saveMatch(${mi})">${r.played?'Update result':'Save result (0–0 if no goals)'}</button>
+    <div id="toast-${mi}" class="saved-toast">Result saved ✓</div>
+    ${r.played?`<button class="share-btn" onclick="shareMatchResult(${mi})">📷 Share result</button>`:''}
+    ${(r.played&&isFriendlyMode())?`<button class="share-btn" onclick="showMatchRecap(${mi})">📝 Recap</button>`:''}
+    ${(r.played&&!compact)?mediaLinksHtml(mi,r.mediaLinks):''}
+    ${matchAutoPOTMHtml(mi,r,m)}
+    ${potmVoteHtml(mi,r,m)}`;
+}
 function renderMatches(){
   const c=document.getElementById('matches-container');
   if(state.formatType==='knockout'){
@@ -4313,40 +4416,24 @@ function renderMatches(){
     return;
   }
   const compact=state.resultsCompact===true;
+  // MATCH CENTER: this per-match template used to contain EVERY editing control inline (scorer/
+  // assist rows, squad picker, defensive stats, voice log, save/share/POTM) -- see the comment on
+  // matchDetailBodyHtml() above for why that's now split out into the Match Center modal instead.
+  // What's left here is deliberately just the glanceable stuff: score, LIVE badge, timer,
+  // predictions, feed, and a button to open the rest for that one match.
   let html=nextUpMatchBannerHtml()+renderPredictionLeaderboardHtml()+resultsCompactToggleHtml()+state.fixtures.map((m,mi)=>{
     const r=state.results[mi];
-    const na=state.teamNames[m[0]],nb=state.teamNames[m[1]];
     const liveScore=calcMatchScore(state.results,mi,state.fixtures);
     const matchesPerLeg=state.numTeams*(state.numTeams-1)/2;
     const legNote=state.legs>1?` <span style="color:#bbb">(leg ${Math.floor(mi/matchesPerLeg)+1})</span>`:'';
-    const scorerRows=r.scorers.map((s,si)=>`
-      <div class="scorer-row">
-        <select onchange="updateScorer(${mi},${si},'team',this.value)">
-          <option value="${m[0]}" ${s.team===m[0]?'selected':''}>${esc(na)}</option>
-          <option value="${m[1]}" ${s.team===m[1]?'selected':''}>${esc(nb)}</option>
-        </select>
-        ${nameFieldHtml(s.team,s.name,'scorer',{mi:mi,si:si})}
-        <input type="number" min="1" max="20" value="${s.goals||1}" onchange="updateScorer(${mi},${si},'goals',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:13px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric" title="Goals scored">
-        ${compact?'':`<label class="pen-check" title="Scored from the penalty spot"><input type="checkbox" ${s.pen?'checked':''} onchange="updateScorer(${mi},${si},'pen',this.checked)"> Pen</label>`}
-        <button class="rem-btn" onclick="removeScorer(${mi},${si})">×</button>
-      </div>`).join('');
-    const assistRows=(r.assists||[]).map((s,si)=>`
-      <div class="scorer-row">
-        <select onchange="updateAssist(${mi},${si},'team',this.value)">
-          <option value="${m[0]}" ${s.team===m[0]?'selected':''}>${esc(na)}</option>
-          <option value="${m[1]}" ${s.team===m[1]?'selected':''}>${esc(nb)}</option>
-        </select>
-        ${nameFieldHtml(s.team,s.name,'assist',{mi:mi,si:si})}
-        <input type="number" min="1" max="20" value="${s.count||1}" onchange="updateAssist(${mi},${si},'count',this.value)" style="width:46px;text-align:center;padding:7px 4px;border:1px solid #ccc;border-radius:8px;font-size:13px;font-weight:700;background:#f8f7f2;color:#1a1a1a" inputmode="numeric" title="Assists">
-        <button class="rem-btn" onclick="removeAssist(${mi},${si})">×</button>
-      </div>`).join('');
-    const squadHtml=squadPickerHtml('league',mi,m,compact);
     // PHASE 2 -- "distinct LIVE visual treatment": before this, a match in progress looked
     // identical to one that hadn't started -- the only signal was the timer digits turning green
     // deep inside the card. isLive drives a card-level badge + accent border instead, so a host
     // scanning a long Matches list can tell at a glance which one is actually being played right
     // now (mirrors the timer's own r.timer.running flag, just surfaced at the card level too).
     const isLive=!!(r.timer&&r.timer.running);
+    const scorerCount=r.scorers.filter(s=>(s.name||'').trim()).length;
+    const logHint=scorerCount?`${scorerCount} scorer${scorerCount===1?'':'s'} logged`:'No scorers logged yet';
     return`<div class="match-card${isLive?' match-card-live':''}" id="match-card-${mi}">
       <div class="match-label">${isLive?'<span class="live-badge">🔴 LIVE</span> ':''}Match ${mi+1}${legNote} &nbsp;·&nbsp; ${teamLabel(m[0])} vs ${teamLabel(m[1])} ${r.played?'<span style="font-size:11px;color:#2a7d1a">✓ saved</span>':''}</div>
       ${isFriendlyMode()?rivalryHtml(mi):''}
@@ -4361,25 +4448,10 @@ function renderMatches(){
       ${sharedMeta?`<div id="fan-predictions-${mi}" class="prediction-section fan-prediction-section"></div>`:''}
       ${matchTimerHtml(mi,r,compact)}
       ${matchFeedHtml(mi,r)}
-      <div style="font-size:11px;color:#aaa;text-align:center;margin-bottom:10px">Score is the total of goal scorers added below. No scorers yet = 0–0.</div>
-      <div class="scorers-label">Goal scorers: <span style="color:#aaa">name · goals · team</span></div>
-      <div id="scorers-${mi}">${scorerRows}</div>
-      <button class="add-scorer" onclick="promptAddScorer(${mi})">+ Add scorer</button>
-      <button class="add-scorer" onclick="quickAddGoal(${mi})" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick goal</button>
-      <div class="scorers-label" style="margin-top:10px">Assists: <span style="color:#aaa">name · assists · team</span></div>
-      <div id="assists-${mi}">${assistRows}</div>
-      <button class="add-scorer" onclick="promptAddAssist(${mi})">+ Add assist</button>
-      <button class="add-scorer" onclick="quickAddAssist(${mi})" title="Pick a team, then a player, in one flow" style="border-style:dashed">⚡ Quick assist</button>
-      ${compact?'':`<button class="add-scorer" id="voice-btn-${mi}" onclick="startVoiceLog(${mi})" style="border-style:dashed">🎤 Voice log</button>`}
-      ${squadHtml}
-      ${defStatsPanelHtml('league',mi,r,m)}
-      <button class="save-btn" onclick="saveMatch(${mi})">${r.played?'Update result':'Save result (0–0 if no goals)'}</button>
-      <div id="toast-${mi}" class="saved-toast">Result saved ✓</div>
-      ${r.played?`<button class="share-btn" onclick="shareMatchResult(${mi})">📷 Share result</button>`:''}
-      ${(r.played&&isFriendlyMode())?`<button class="share-btn" onclick="showMatchRecap(${mi})">📝 Recap</button>`:''}
-      ${(r.played&&!compact)?mediaLinksHtml(mi,r.mediaLinks):''}
-      ${matchAutoPOTMHtml(mi,r,m)}
-      ${potmVoteHtml(mi,r,m)}
+      <button class="save-btn" onclick="openMatchCenter('league','${mi}')" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <span>📝 View match &amp; log</span>
+        <span style="font-size:11px;font-weight:400;opacity:0.85">${esc(logHint)} →</span>
+      </button>
     </div>`;
   }).join('');
   // Hybrid tournaments (a round-robin group stage followed by a knockout stage -- automatic
@@ -4397,6 +4469,9 @@ function renderMatches(){
   if(sharedMeta){
     state.fixtures.forEach((m,mi)=>loadAndRenderFanPredictions(mi,'fan-predictions-'+mi));
   }
+  // Keep the Match Center modal in sync with whatever just changed -- it's a separate DOM subtree
+  // from matches-container now, so it doesn't get refreshed by the c.innerHTML write above.
+  if(matchCenterOpen&&matchCenterOpen.kind==='league')renderMatchCenterModal();
 }
 
 // FAN PREDICTIONS -- separate from the existing member-only prediction system above
